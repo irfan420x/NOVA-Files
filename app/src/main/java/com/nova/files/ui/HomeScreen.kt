@@ -45,7 +45,8 @@ fun HomeScreen(
     onOpenDir: (File) -> Unit, onOpenCategory: (String) -> Unit,
     onOpenFile: (File, List<File>) -> Unit,
     darkTheme: Boolean, onToggleTheme: () -> Unit,
-    onOpenErrorLog: () -> Unit = {}
+    onOpenErrorLog: () -> Unit = {},
+    onOpenApps: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -245,6 +246,18 @@ fun HomeScreen(
                 modifier = Modifier.clip(RoundedCornerShape(12.dp))
                     .background(MaterialTheme.colorScheme.surfaceVariant)
                     .clickable { onOpenDir(dir) }
+            )
+        }
+        // v1.14: the App Manager — every installed app with its size,
+        // APK backup to Downloads/NOVA/Apps, and uninstall.
+        item {
+            ListItem(
+                headlineContent = { Text("App manager") },
+                supportingContent = { Text("Installed apps — back up APKs, uninstall, open") },
+                leadingContent = { Icon(Icons.Filled.Apps, null, tint = MaterialTheme.colorScheme.primary) },
+                modifier = Modifier.clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable { onOpenApps() }
             )
         }
         // v1.8: the error log — every crash and failed operation is recorded

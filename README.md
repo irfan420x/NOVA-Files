@@ -20,6 +20,8 @@ for Android 10+.
   Remove PIN, and "Forgot PIN?" via fingerprint
 - **Viewers** — image viewer with pinch-zoom, share and prev/next;
   text viewer
+- **App Manager** — every installed app with its size, APK backup to
+  Downloads/NOVA/Apps, and uninstall
 - **Dark / light theme**, persisted
 - **In-app Error log** — every crash and failed operation is recorded with
   its time, so problems can be reported with the exact error
@@ -54,6 +56,10 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
+- **v1.14** — Advanced: App Manager — a full list of installed apps
+  (user apps first, system apps behind a toggle) with search, APK size,
+  Open, Back up APK (saved to Downloads/NOVA/Apps) and Uninstall.
+  Reach it from the App manager row on Home; the back button returns Home.
 - **v1.13** — Full audit fixes: the category lists and Recent files used
   `LIMIT` in the MediaStore sort order, which the provider rejects —
   categories fell back to a slow whole-storage walk and Recent files

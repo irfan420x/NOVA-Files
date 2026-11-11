@@ -28,7 +28,7 @@ import com.nova.files.data.FileRepo
 import com.nova.files.ui.*
 import java.io.File
 
-enum class Screen { HOME, BROWSER, ANALYZER, TRASH, VAULT }
+enum class Screen { HOME, BROWSER, ANALYZER, TRASH, VAULT, APPS }
 
 // FragmentActivity (not ComponentActivity) so the Vault can use BiometricPrompt.
 class MainActivity : FragmentActivity() {
@@ -110,7 +110,7 @@ fun NovaApp() {
     // Vault returns Home instead of exiting the app.
     BackHandler(enabled = viewerFile == null && showErrorLog) { showErrorLog = false }
     BackHandler(enabled = viewerFile == null && !showErrorLog && browseCategory == null &&
-        (screen == Screen.ANALYZER || screen == Screen.TRASH || screen == Screen.VAULT)) {
+        (screen == Screen.ANALYZER || screen == Screen.TRASH || screen == Screen.VAULT || screen == Screen.APPS)) {
         screen = Screen.HOME
     }
 
@@ -234,8 +234,10 @@ private fun NovaAppContent(
                     onOpenCategory = { cat -> onBrowseCategory(cat); onBrowseDir(FileRepo.internalRoot()); onScreenChange(Screen.BROWSER) },
                     onOpenFile = onOpenViewer,
                     darkTheme = darkTheme, onToggleTheme = onToggleTheme,
-                    onOpenErrorLog = { onShowErrorLog(true) }
+                    onOpenErrorLog = { onShowErrorLog(true) },
+                    onOpenApps = { onScreenChange(Screen.APPS) }
                 )
+                Screen.APPS -> AppManagerScreen(onBack = { onScreenChange(Screen.HOME) })
                 Screen.BROWSER -> BrowserScreen(
                     dir = browseDir,
                     category = browseCategory,
