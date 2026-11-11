@@ -3,13 +3,10 @@
 # is broken in this VM because Java loopback TCP is intercepted).
 # Steps: aapt2 compile+link, javac R.java, kotlinc (embeddable) + Compose
 # plugin, d8, zipalign, apksigner.
-# Toolchain locations come from the environment when set (JAVA_HOME,
-# ANDROID_HOME, KOTLINC_HOME); otherwise the bundled paths under tools/ and
-# ~/android-sdk are used. See README.md for the prerequisites.
 set -e
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-export JAVA_HOME="${JAVA_HOME:-$ROOT/tools/jdk-17.0.21+9}"
-export ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
+ROOT="$HOME/workspace/nova-files"
+export JAVA_HOME="$ROOT/tools/jdk-17.0.21+9"
+export ANDROID_HOME="$HOME/android-sdk"
 export PATH="$JAVA_HOME/bin:$PATH"
 AAPT2="$ANDROID_HOME/build-tools/35.0.0/aapt2"
 D8="$ANDROID_HOME/build-tools/35.0.0/d8"
@@ -41,7 +38,7 @@ echo "== 2. aapt2 link =="
 LINK_ARGS=(-I "$ANDROID_JAR" --manifest "$SRC/AndroidManifest.xml"
     --auto-add-overlay --java "$BUILD/gen"
     --min-sdk-version 29 --target-sdk-version 35
-    --version-code 12 --version-name 1.11
+    --version-code 13 --version-name 1.12
     -o "$BUILD/apk/app-unsigned.apk")
 while read -r pkg resdir; do
     LINK_ARGS+=(--extra-packages "$pkg")

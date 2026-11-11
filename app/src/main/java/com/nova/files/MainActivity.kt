@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import com.nova.files.data.FileRepo
@@ -31,6 +32,24 @@ enum class Screen { HOME, BROWSER, ANALYZER, TRASH, VAULT }
 
 // FragmentActivity (not ComponentActivity) so the Vault can use BiometricPrompt.
 class MainActivity : FragmentActivity() {
+
+    // Classic permission result: the Activity Result API generates request
+    // codes >= 65536 and FragmentActivity rejects those, so on API < 30 we
+    // use ActivityCompat.requestPermissions with a small code instead.
+    // The composable watches this counter to re-check access.
+    var permissionResult by mutableStateOf(0)
+        private set
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_STORAGE_PERMISSIONS) permissionResult++
+    }
+
+    companion object {
+        const val REQUEST_STORAGE_PERMISSIONS = 1001
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -74,17 +93,25 @@ fun NovaApp() {
         viewerIndex = siblings.indexOf(file).coerceAtLeast(0)
     }
 
-    val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { hasAccess = checkAccess(context) }
+    val activity = context as? MainActivity
+    val permissionResult = activity?.permissionResult ?: 0
 
-    LaunchedEffect(Unit) { hasAccess = checkAccess(context) }
+    // The classic permission result (API < 30) arrives through the Activity;
+    // re-check access whenever it changes.
+    LaunchedEffect(permissionResult) { hasAccess = checkAccess(context) }
 
     // System back in the file/image viewer closes the viewer instead of the app.
     BackHandler(enabled = viewerFile != null) { viewerFiles = emptyList() }
     // v1.7: back from a category list returns Home (v1.0–v1.6 exited the app).
     BackHandler(enabled = viewerFile == null && browseCategory != null && screen == Screen.BROWSER) {
         browseCategory = null; screen = Screen.HOME
+    }
+    // v1.12: back from the error log closes it; back from Analyzer / Trash /
+    // Vault returns Home instead of exiting the app.
+    BackHandler(enabled = viewerFile == null && showErrorLog) { showErrorLog = false }
+    BackHandler(enabled = viewerFile == null && !showErrorLog && browseCategory == null &&
+        (screen == Screen.ANALYZER || screen == Screen.TRASH || screen == Screen.VAULT)) {
+        screen = Screen.HOME
     }
 
     NovaTheme(darkTheme = darkTheme) {
@@ -101,7 +128,13 @@ fun NovaApp() {
                             context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
                         }
                     } else {
-                        permissionLauncher.launch(storagePermissions())
+                        // API < 30: classic requestPermissions with a small
+                        // request code — the Activity Result API generates
+                        // codes >= 65536, which FragmentActivity rejects.
+                        val act = activity ?: return@NovaAppContent
+                        ActivityCompat.requestPermissions(
+                            act, storagePermissions(), MainActivity.REQUEST_STORAGE_PERMISSIONS
+                        )
                     }
                 },
                 onRecheck = { hasAccess = checkAccess(context) },
