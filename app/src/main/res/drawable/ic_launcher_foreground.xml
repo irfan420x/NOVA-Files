@@ -1,0 +1,15 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Folder back (darker purple), peeking above the front -->
+    <group android:translateY="-6">
+        <path android:fillColor="#5B3EE6"
+            android:pathData="M47.7,28.8 H28.8 c-3.47,0 -6.27,2.84 -6.27,6.3 L22.5,72.9 c0,3.47 2.84,6.3 6.3,6.3 h50.4 c3.47,0 6.3,-2.84 6.3,-6.3 V41.4 c0,-3.47 -2.84,-6.3 -6.3,-6.3 h-25.2 l-6.3,-6.3 z"/>
+    </group>
+    <!-- Folder front (NOVA purple) -->
+    <path android:fillColor="#7C5CFF"
+        android:pathData="M47.7,28.8 H28.8 c-3.47,0 -6.27,2.84 -6.27,6.3 L22.5,72.9 c0,3.47 2.84,6.3 6.3,6.3 h50.4 c3.47,0 6.3,-2.84 6.3,-6.3 V41.4 c0,-3.47 -2.84,-6.3 -6.3,-6.3 h-25.2 l-6.3,-6.3 z"/>
+    <!-- NOVA star on the folder -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M54,45 L58.5,53.5 L67,58 L58.5,62.5 L54,71 L49.5,62.5 L41,58 L49.5,53.5 Z"/>
+</vector>
