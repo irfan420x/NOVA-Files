@@ -270,7 +270,10 @@ object FileRepo {
             val projection = arrayOf(MediaStore.MediaColumns.DATA, MediaStore.MediaColumns.DATE_MODIFIED)
             fun queryFiles(uri: android.net.Uri, selection: String? = null, args: Array<String>? = null): List<File> {
                 val out = mutableListOf<File>()
-                resolver.query(uri, projection, selection, args, "${MediaStore.MediaColumns.DATE_MODIFIED} DESC LIMIT 500")?.use { c ->
+                // v1.13: NO LIMIT in the sort order — MediaStore rejects the
+                // LIMIT token ("Invalid token LIMIT"), so every category fell
+                // back to a slow whole-storage walk. Cap with .take(500).
+                resolver.query(uri, projection, selection, args, "${MediaStore.MediaColumns.DATE_MODIFIED} DESC")?.use { c ->
                     val dataIdx = c.getColumnIndex(MediaStore.MediaColumns.DATA)
                     while (c.moveToNext()) {
                         val path = if (dataIdx >= 0) c.getString(dataIdx) else null
@@ -280,7 +283,7 @@ object FileRepo {
                         }
                     }
                 }
-                return out
+                return out.take(500)
             }
             val filesUri = MediaStore.Files.getContentUri("external")
             val docSel = "mime_type IN (${docMimes.joinToString(",") { "?" }})"
@@ -336,11 +339,14 @@ object FileRepo {
     suspend fun recentFiles(context: Context, limit: Int = 20): List<File> = withContext(Dispatchers.IO) {
         try {
             val out = mutableListOf<File>()
+            // v1.13: NO LIMIT in the sort order — MediaStore rejects the
+            // LIMIT token, so this query threw and Recent files showed
+            // nothing at all. Cap with .take(limit) instead.
             context.contentResolver.query(
                 MediaStore.Files.getContentUri("external"),
                 arrayOf(MediaStore.MediaColumns.DATA),
                 null, null,
-                "${MediaStore.MediaColumns.DATE_MODIFIED} DESC LIMIT $limit"
+                "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
             )?.use { c ->
                 val idx = c.getColumnIndex(MediaStore.MediaColumns.DATA)
                 while (c.moveToNext()) {
@@ -351,7 +357,7 @@ object FileRepo {
                     if (f.isFile) out.add(f)
                 }
             }
-            out
+            out.take(limit)
         } catch (e: Exception) { emptyList() }
     }
 
@@ -426,7 +432,10 @@ object FileRepo {
             try {
                 destDir.mkdirs()
                 files.forEachIndexed { idx, src ->
-                    val dest = File(destDir, src.name)
+                    // v1.13: never silently overwrite — a same-named file in
+                    // the destination gets "name (1).ext" instead of being
+                    // destroyed by the paste.
+                    val dest = nonCollidingDest(destDir, src.name)
                     if (src.isDirectory) copyDir(src, dest) else copyFile(src, dest)
                     if (move) deleteRecursively(src)
                     onProgress(idx + 1, files.size)
@@ -434,6 +443,20 @@ object FileRepo {
                 true
             } catch (e: Exception) { false }
         }
+
+    /** A destination name that does not overwrite an existing file. */
+    private fun nonCollidingDest(dir: File, name: String): File {
+        var dest = File(dir, name)
+        if (!dest.exists()) return dest
+        val base = name.substringBeforeLast('.', name)
+        val ext = if ('.' in name) ".${name.substringAfterLast('.')}" else ""
+        var n = 1
+        while (dest.exists()) {
+            dest = File(dir, "$base ($n)$ext")
+            n++
+        }
+        return dest
+    }
 
     private fun copyFile(src: File, dest: File) {
         FileInputStream(src).use { ins -> FileOutputStream(dest).use { out -> ins.copyTo(out) } }
@@ -618,10 +641,27 @@ object FileRepo {
         } catch (e: Exception) { false }
     }
 
+    // v1.13: the old code delegated to Junrar.extract(), which writes
+    // entries unchecked — a crafted RAR could escape the destination
+    // (path traversal). Now entries go through the same safeOut guard
+    // as ZIP/7z/TAR, one file at a time.
     private fun extractRar(archive: File, destDir: File): Boolean {
         return try {
             destDir.mkdirs()
-            com.github.junrar.Junrar.extract(archive, destDir)
+            com.github.junrar.Archive(archive).use { arch ->
+                var header = arch.nextFileHeader()
+                while (header != null) {
+                    val out = safeOut(destDir, header.fileNameString)
+                    if (out != null) {
+                        if (header.isDirectory) out.mkdirs()
+                        else {
+                            out.parentFile?.mkdirs()
+                            FileOutputStream(out).use { o -> arch.extractFile(header, o) }
+                        }
+                    }
+                    header = arch.nextFileHeader()
+                }
+            }
             true
         } catch (e: Exception) { false }
     }

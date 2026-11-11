@@ -54,6 +54,13 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
+- **v1.13** — Full audit fixes: the category lists and Recent files used
+  `LIMIT` in the MediaStore sort order, which the provider rejects —
+  categories fell back to a slow whole-storage walk and Recent files
+  showed nothing at all. Copying into a folder with a same-named file no
+  longer silently overwrites it (auto-rename to "name (1).ext"). RAR
+  extraction now goes through the same zip-slip guard as ZIP/7z/TAR
+  instead of junrar's unchecked extractor.
 - **v1.12** — The system back button now steps back — from Analyzer,
   Trash or Vault to Home, and the error log closes — instead of exiting
   the app. Also: on Android 10 the permission request now uses the classic
