@@ -26,7 +26,8 @@ enum class SortMode { NAME, SIZE, DATE, TYPE }
 data class StorageStats(
     val totalBytes: Long,          // whole flash chip (device total)
     val freeBytes: Long,           // free space on the userdata partition
-    val usedBytes: Long,           // device total - free (matches stock file managers)
+    val usedBytes: Long,           // userdata used (partition total - free,
+                                    // matches Settings / Files by Google)
     val systemBytes: Long,         // device total - userdata partition total
     val partitionTotalBytes: Long  // userdata partition total (StatFs)
 )
@@ -216,7 +217,11 @@ object FileRepo {
         val free = stat.availableBlocksLong * stat.blockSizeLong
         val deviceTotal = deviceTotalBytes(partitionTotal)
         val system = (deviceTotal - partitionTotal).coerceAtLeast(0L)
-        return StorageStats(deviceTotal, free, deviceTotal - free, system, partitionTotal)
+        // v1.15: "used" is now the userdata used (partition total - free),
+        // which is what Settings and Files by Google show (~42 GB on this
+        // phone). The old headline (device total - free) counted the system
+        // partition too, so it read ~14 GB higher than Settings.
+        return StorageStats(deviceTotal, free, partitionTotal - free, system, partitionTotal)
     }
 
     suspend fun listFiles(dir: File, sort: SortMode, query: String, showHidden: Boolean): List<File> =
@@ -431,7 +436,14 @@ object FileRepo {
         withContext(Dispatchers.IO) {
             try {
                 destDir.mkdirs()
+                val destCanon = destDir.canonicalPath
                 files.forEachIndexed { idx, src ->
+                    // v1.15: never copy/move a folder into itself — that
+                    // recursed forever and filled the storage with junk.
+                    val srcCanon = src.canonicalPath
+                    if (destCanon == srcCanon || destCanon.startsWith("$srcCanon${File.separator}")) {
+                        return@withContext false
+                    }
                     // v1.13: never silently overwrite — a same-named file in
                     // the destination gets "name (1).ext" instead of being
                     // destroyed by the paste.
@@ -491,8 +503,10 @@ object FileRepo {
             val trash = trashDir(context)
             val stamp = System.currentTimeMillis()
             val index = trashIndex(context).edit()
-            files.forEach { src ->
-                val dest = File(trash, "${stamp}_${src.name}")
+            files.forEachIndexed { idx, src ->
+                // v1.15: the stamp alone collides when two same-named files
+                // are trashed together — the index makes each dest unique.
+                val dest = File(trash, "${stamp}_${idx}_${src.name}")
                 if (src.isDirectory) copyDir(src, dest) else copyFile(src, dest)
                 deleteRecursively(src)
                 index.putString(dest.name, src.parentFile?.absolutePath ?: "")
@@ -508,10 +522,22 @@ object FileRepo {
 
     suspend fun restoreFromTrash(context: Context, file: File): Boolean = withContext(Dispatchers.IO) {
         try {
-            val name = file.name.substringAfter('_', file.name)
+            // Trash file names are "<stamp>_<index>_<original name>" (v1.15)
+            // or "<stamp>_<original name>" (v1.14 and older) — strip only
+            // the numeric prefixes so an original name with underscores
+            // (e.g. "my_file.jpg") survives intact.
+            val name = Regex("^\\d+_\\d+_(.*)$").find(file.name)?.groupValues?.get(1)
+                ?: Regex("^\\d+_(.*)$").find(file.name)?.groupValues?.get(1)
+                ?: file.name
             val parentPath = trashIndex(context).getString(file.name, null)
             val parent = parentPath?.takeIf { it.isNotBlank() }?.let { File(it) }
-            val dest = if (parent != null && parent.isDirectory) File(parent, name) else File(internalRoot(), name)
+            // v1.15: restore never overwrites — a same-named file at the
+            // original location gets "name (1).ext" instead of being destroyed.
+            val dest = if (parent != null && parent.isDirectory) {
+                nonCollidingDest(parent, name)
+            } else {
+                nonCollidingDest(internalRoot(), name)
+            }
             if (file.isDirectory) copyDir(file, dest) else copyFile(file, dest)
             deleteFromTrash(context, file)
             true

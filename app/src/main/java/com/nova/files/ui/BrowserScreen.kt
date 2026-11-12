@@ -341,7 +341,14 @@ fun BrowserScreen(
             text = { Text(if (targets.size == 1) targets.first().name else targets.take(3).joinToString("\n") { it.name } + if (targets.size > 3) "\n…and ${targets.size - 3} more" else "") },
             confirmButton = {
                 TextButton(onClick = {
-                    scope.launch { FileRepo.moveToTrash(context, targets); selected = emptySet(); status = "Moved to Trash"; load() }
+                    scope.launch {
+                        // v1.15: check the result — the old code reported
+                        // "Moved to Trash" even when the move had failed.
+                        val ok = FileRepo.moveToTrash(context, targets)
+                        selected = emptySet()
+                        status = if (ok) "Moved to Trash" else "Couldn't move to Trash"
+                        load()
+                    }
                     deleteTargets = null
                 }) { Text("Move to Trash") }
             },

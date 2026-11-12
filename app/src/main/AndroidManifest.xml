@@ -13,6 +13,10 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- v1.15: the App Manager needs the full installed-app list. Without
+         QUERY_ALL_PACKAGES, Android 11+ filters getInstalledPackages() and
+         many user apps are missing from the list. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <!-- v1.8: the Vault's fingerprint unlock needs these. The manual aapt2
          build does NOT merge AAR manifests, so the biometric AAR's own
          declarations never reached the app — without them, opening the Vault

@@ -4,4 +4,8 @@
     <external-files-path name="external_files" path="." />
     <files-path name="files" path="." />
     <cache-path name="cache" path="." />
+    <!-- v1.15: removable volumes (OTG/USB at /storage/<UUID>/) are outside
+         every root above, so FileProvider refused them and no OTG file could
+         be opened or shared. root-path covers all mounted volumes. -->
+    <root-path name="root" path="." />
 </paths>

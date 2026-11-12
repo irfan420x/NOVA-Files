@@ -96,7 +96,7 @@ fun HomeScreen(
 
     val root = FileRepo.internalRoot()
     val dateFmt = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
-    val usedPct = if (stats.totalBytes > 0) (stats.usedBytes * 100 / stats.totalBytes).toInt() else 0
+    val usedPct = if (stats.partitionTotalBytes > 0) (stats.usedBytes * 100 / stats.partitionTotalBytes).toInt() else 0
     val categories = listOf(
         Category("images", "Images", Icons.Filled.Image, counts?.images ?: 0),
         Category("videos", "Videos", Icons.Filled.Videocam, counts?.videos ?: 0),
@@ -143,14 +143,14 @@ fun HomeScreen(
                     Spacer(Modifier.height(8.dp))
                     Text("${formatSizeDecimal(stats.usedBytes)} used  •  ${formatSizeDecimal(stats.freeBytes)} free")
                     Text(
-                        "of ${formatSizeDecimal(stats.totalBytes)} total",
+                        "of ${formatSizeDecimal(stats.partitionTotalBytes)} user storage  •  ${formatSizeDecimal(stats.totalBytes)} total",
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         style = MaterialTheme.typography.bodySmall
                     )
                     if (stats.systemBytes > 0) {
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            "System ${formatSizeDecimal(stats.systemBytes)}  •  Your files ${formatSizeDecimal(stats.partitionTotalBytes - stats.freeBytes)}",
+                            "System ${formatSizeDecimal(stats.systemBytes)}",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall
                         )

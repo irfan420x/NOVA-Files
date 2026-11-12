@@ -149,8 +149,15 @@ fun AnalyzerScreen(
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
-                        FileRepo.moveToTrash(context, listOf(target))
-                        dups = dups.map { g -> g.copy(files = g.files - target) }.filter { it.files.size > 1 }
+                        // v1.15: only remove it from the list if the move
+                        // actually succeeded — the old code hid it even on
+                        // failure, so the file looked deleted but wasn't.
+                        val ok = FileRepo.moveToTrash(context, listOf(target))
+                        if (ok) {
+                            dups = dups.map { g -> g.copy(files = g.files - target) }.filter { it.files.size > 1 }
+                        } else {
+                            status = "Couldn't move to Trash"
+                        }
                         dupDeleteTarget = null
                     }
                 }) { Text("Move to Trash") }

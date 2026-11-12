@@ -16,7 +16,10 @@ data class AppInfo(
     val isSystem: Boolean,
     val apkBytes: Long,
     val installTime: Long,
-    val apkPath: String
+    val apkPath: String,
+    /** Extra APK splits (config.arm64_v8a, config.en, …) — most Play apps
+     *  on Android 14 are split APKs, so a base-only backup won't install. */
+    val splitPaths: List<String> = emptyList()
 )
 
 object AppRepo {
@@ -35,15 +38,21 @@ object AppRepo {
             for (pkg in packages) {
                 val ai = pkg.applicationInfo ?: continue
                 val apk = File(ai.sourceDir)
+                // v1.15: count the splits too — the shown size understated
+                // real app size, and a base-only backup won't install.
+                val splits = ai.splitSourceDirs?.toList().orEmpty()
+                val allApks = listOf(ai.sourceDir) + splits
+                val totalBytes = allApks.sumOf { File(it).let { f -> if (f.exists()) f.length() else 0L } }
                 out += AppInfo(
                     label = pm.getApplicationLabel(ai).toString(),
                     packageName = pkg.packageName,
                     versionName = pkg.versionName ?: "",
                     versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) pkg.longVersionCode else pkg.versionCode.toLong(),
                     isSystem = (ai.flags and ApplicationInfo.FLAG_SYSTEM) != 0,
-                    apkBytes = if (apk.exists()) apk.length() else 0L,
+                    apkBytes = totalBytes,
                     installTime = pkg.firstInstallTime,
-                    apkPath = ai.sourceDir
+                    apkPath = ai.sourceDir,
+                    splitPaths = splits
                 )
             }
         } catch (e: Exception) {
@@ -55,7 +64,12 @@ object AppRepo {
         )
     }
 
-    /** Copy the app's APK into Downloads/NOVA/Apps. Returns the saved file. */
+    /**
+     * Copy the app's APK(s) into Downloads/NOVA/Apps/<label>-<version>/.
+     * v1.15: backs up the base APK AND every split (config.arm64_v8a,
+     * config.en, …) — a base-only backup of a split APK fails to install.
+     * Returns the base APK file.
+     */
     fun backupApk(context: Context, app: AppInfo): File? {
         return try {
             val src = File(app.apkPath)
@@ -68,9 +82,17 @@ object AppRepo {
             )
             if (!dir.exists()) dir.mkdirs()
             val safeLabel = app.label.replace(Regex("[^A-Za-z0-9._-]+"), "_")
-            val dest = File(dir, "$safeLabel-${app.versionName.ifBlank { app.versionCode.toString() }}.apk")
-            src.copyTo(dest, overwrite = true)
-            dest
+            val appDir = File(dir, "$safeLabel-${app.versionName.ifBlank { app.versionCode.toString() }}")
+            if (!appDir.exists()) appDir.mkdirs()
+            val baseDest = File(appDir, "base.apk")
+            src.copyTo(baseDest, overwrite = true)
+            app.splitPaths.forEach { splitPath ->
+                val split = File(splitPath)
+                if (split.exists()) {
+                    split.copyTo(File(appDir, split.name), overwrite = true)
+                }
+            }
+            baseDest
         } catch (e: Exception) {
             ErrorLog.log(context, "Files", "Failed to back up ${app.packageName}", e)
             null

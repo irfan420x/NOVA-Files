@@ -56,6 +56,17 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
+- **v1.15** — Audit bug fixes: copying/moving a folder into itself is now
+  refused (it used to recurse forever and fill storage); Trash restore no
+  longer overwrites a same-named file at the original location
+  (auto-rename to "name (1).ext"); delete now reports failure instead of
+  claiming "Moved to Trash" when the move failed; files on OTG/USB volumes
+  can finally be opened and shared (the FileProvider config had no
+  root-path); the App Manager now lists every installed app on Android 11+
+  (`QUERY_ALL_PACKAGES`) and APK backup copies all split APKs, so backed-up
+  apps actually install; the headline "used" storage is now the userdata
+  used, matching Settings (it used to include the system partition, reading
+  ~14 GB high).
 - **v1.14** — Advanced: App Manager — a full list of installed apps
   (user apps first, system apps behind a toggle) with search, APK size,
   Open, Back up APK (saved to Downloads/NOVA/Apps) and Uninstall.
