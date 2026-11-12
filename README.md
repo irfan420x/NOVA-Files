@@ -56,6 +56,32 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
+- **v1.17** — Final audit fixes: share uses `ACTION_SEND` for one file (the
+  old code always sent `ACTION_SEND_MULTIPLE`) with `ClipData` so the URI
+  permission actually reaches the app you pick, and reports failure instead
+  of doing nothing silently; the Vault PIN is now salted (`v2:<salt>:<hash>`,
+  old hashes migrate on unlock) and `allowBackup` is off so the vault and
+  the PIN hash never leave the device in a backup; the viewer no longer
+  offers Share for vault files; copy/move/Trash/restore now verify the copy
+  and the delete, so a failed step can no longer leave duplicates or report
+  success; Trash names only strip a 13-digit timestamp prefix (a file called
+  `123_report.pdf` no longer restores as `report.pdf`); duplicate scan
+  skips `Android/` and hidden folders, and Stop works during hashing;
+  search runs as you type; RAR5 is detected and refused honestly (junrar
+  reads RAR4 only); extract folders keep the full base name (`my.backup.zip`
+  → `my.backup`); size formatting no longer shows `1000.0 KB`; `.gitignore`
+  is no longer treated as extension `GITIGNORE`; empty folders survive a
+  ZIP round-trip; permission is re-checked on resume; the Analyzer compares
+  used space against the userdata partition; New Folder validates its name;
+  double-tap paste can't paste twice; all lists use stable keys.
+- **v1.16** — Second-audit fixes: Vault Import no longer crashes (classic
+  `startActivityForResult` instead of the Activity Result API, which
+  FragmentActivity rejects); tapping an APK can now install it
+  (`REQUEST_INSTALL_PACKAGES`); Vault import is a MOVE with the real
+  filename; text viewer streams the first 200 KB instead of loading the
+  whole file; Trash Delete/Empty-all ask first and Restore reports failure;
+  plain `.gz` files actually extract; Trash shows real names; sort works in
+  category views; rename rejects `/`; moving into its own folder is a no-op.
 - **v1.15** — Audit bug fixes: copying/moving a folder into itself is now
   refused (it used to recurse forever and fill storage); Trash restore no
   longer overwrites a same-named file at the original location

@@ -8,10 +8,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -24,6 +22,9 @@ import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.nova.files.data.FileRepo
 import com.nova.files.ui.*
 import java.io.File
@@ -112,6 +113,9 @@ fun NovaApp() {
     var darkTheme by remember { mutableStateOf(FileRepo.loadUiPrefs(context).darkTheme) }
     var viewerFiles by remember { mutableStateOf<List<File>>(emptyList()) }
     var viewerIndex by remember { mutableStateOf(0) }
+    // v1.17: the viewer hides its Share button for vault files — a vault
+    // file shared to another app stops being private.
+    var viewerIsVault by remember { mutableStateOf(false) }
     // v1.8: the in-app error log opens as an overlay, like the viewer.
     var showErrorLog by remember { mutableStateOf(false) }
     val viewerFile = viewerFiles.getOrNull(viewerIndex)
@@ -128,8 +132,21 @@ fun NovaApp() {
     // re-check access whenever it changes.
     LaunchedEffect(permissionResult) { hasAccess = checkAccess(context) }
 
+    // v1.17: re-check on every resume — on API 30+ the user grants
+    // all-files access in Settings and comes back, but the old code only
+    // re-checked after a button tap, so the permission screen stayed up
+    // until "I already allowed it" was pressed.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) hasAccess = checkAccess(context)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // System back in the file/image viewer closes the viewer instead of the app.
-    BackHandler(enabled = viewerFile != null) { viewerFiles = emptyList() }
+    BackHandler(enabled = viewerFile != null) { viewerFiles = emptyList(); viewerIsVault = false }
     // v1.7: back from a category list returns Home (v1.0–v1.6 exited the app).
     BackHandler(enabled = viewerFile == null && browseCategory != null && screen == Screen.BROWSER) {
         browseCategory = null; screen = Screen.HOME
@@ -178,8 +195,10 @@ fun NovaApp() {
                 },
                 viewerFile = viewerFile,
                 viewerFiles = viewerFiles, viewerIndex = viewerIndex,
+                viewerIsVault = viewerIsVault,
+                onViewerIsVaultChange = { viewerIsVault = it },
                 onViewerIndex = { viewerIndex = it },
-                onCloseViewer = { viewerFiles = emptyList() },
+                onCloseViewer = { viewerFiles = emptyList(); viewerIsVault = false },
                 onOpenViewer = ::openViewer,
                 showErrorLog = showErrorLog,
                 onShowErrorLog = { showErrorLog = it }
@@ -197,6 +216,7 @@ private fun NovaAppContent(
     clipboard: Pair<List<File>, Boolean>?, onClipboardChange: (Pair<List<File>, Boolean>?) -> Unit,
     darkTheme: Boolean, onToggleTheme: () -> Unit,
     viewerFile: File?, viewerFiles: List<File>, viewerIndex: Int,
+    viewerIsVault: Boolean, onViewerIsVaultChange: (Boolean) -> Unit,
     onViewerIndex: (Int) -> Unit, onCloseViewer: () -> Unit,
     onOpenViewer: (File, List<File>) -> Unit,
     showErrorLog: Boolean, onShowErrorLog: (Boolean) -> Unit
@@ -209,7 +229,7 @@ private fun NovaAppContent(
     viewerFile?.let { file ->
         ViewerScreen(
             file = file, files = viewerFiles, index = viewerIndex,
-            onNavigate = onViewerIndex, onBack = onCloseViewer
+            onNavigate = onViewerIndex, onBack = onCloseViewer, isVault = viewerIsVault
         )
         return
     }
@@ -278,7 +298,7 @@ private fun NovaAppContent(
                     onOpenDir = { dir -> onBrowseDir(dir); onBrowseCategory(null); onScreenChange(Screen.BROWSER) }
                 )
                 Screen.TRASH -> TrashScreen()
-                Screen.VAULT -> VaultScreen(onOpenFile = { f -> onOpenViewer(f, listOf(f)) })
+                Screen.VAULT -> VaultScreen(onOpenFile = { f -> onViewerIsVaultChange(true); onOpenViewer(f, listOf(f)) })
             }
         }
     }

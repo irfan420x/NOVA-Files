@@ -48,7 +48,11 @@ fun formatSize(bytes: Long): String {
     var v = bytes.toDouble()
     var i = -1
     while (v >= 1024 && i < units.size - 1) { v /= 1024; i++ }
-    return String.format("%.1f %s", v, units[i])
+    // v1.17: 1,024,000 bytes divided out to "1000.0 KB" — promote once
+    // more so it reads "1.0 MB" like every other file manager.
+    if (v >= 999.95 && i < units.size - 1) { v /= 1024; i++ }
+    // Locale.US: %.1f in some locales renders "1,0" or Bengali digits.
+    return String.format(Locale.US, "%.1f %s", v, units[i])
 }
 
 // Decimal (1000-based) sizes, the way stock file managers / Settings show them:
@@ -59,10 +63,58 @@ fun formatSizeDecimal(bytes: Long): String {
     var v = bytes.toDouble()
     var i = -1
     while (v >= 1000 && i < units.size - 1) { v /= 1000; i++ }
-    return String.format("%.1f %s", v, units[i])
+    // v1.17: same boundary promotion as formatSize ("1000.0 KB" -> "1.0 MB").
+    if (v >= 999.95 && i < units.size - 1) { v /= 1000; i++ }
+    return String.format(Locale.US, "%.1f %s", v, units[i])
 }
 
-fun File.extensionLower(): String = name.substringAfterLast('.', "").lowercase()
+// v1.17: a leading dot is NOT an extension — ".gitignore" used to report
+// extension "gitignore" (and fileKind "GITIGNORE"). Only a dot after the
+// first character separates an extension.
+fun File.extensionLower(): String {
+    val idx = name.lastIndexOf('.')
+    if (idx <= 0) return ""
+    return name.substring(idx + 1).lowercase()
+}
+
+/** File name without its extension ("my.backup.zip" -> "my.backup",
+ *  ".gitignore" -> ".gitignore"). Kotlin's nameWithoutExtension returns ""
+ *  for leading-dot files, which made a compress of ".gitignore" target
+ *  a file called ".zip". */
+fun baseNameWithoutExt(name: String): String {
+    val dot = name.lastIndexOf('.')
+    return if (dot <= 0) name else name.substring(0, dot)
+}
+
+/** Strip the archive suffix for the extract destination folder:
+ *  "my.backup.zip" -> "my.backup" (not "my"), "file.tar.gz" -> "file". */
+fun archiveBaseName(name: String): String {
+    val lower = name.lowercase()
+    val stripped = when {
+        lower.endsWith(".tar.gz") -> name.dropLast(7)
+        lower.endsWith(".tgz") -> name.dropLast(4)
+        lower.endsWith(".tar") -> name.dropLast(4)
+        lower.endsWith(".gz") -> name.dropLast(3)
+        else -> name.substringBeforeLast('.', name)
+    }
+    return stripped.takeIf { it.isNotBlank() } ?: "extracted"
+}
+
+/** RAR5 magic: "Rar!\x1A\x07\x01\x00" — junrar only reads RAR4
+ *  ("Rar!\x1A\x07\x00"), so RAR5 must be detected and refused honestly
+ *  instead of offered and failed silently. */
+fun isRar5(f: File): Boolean {
+    return try {
+        FileInputStream(f).use { ins ->
+            val magic = ByteArray(8)
+            val read = ins.read(magic)
+            read == 8 && magic[0] == 0x52.toByte() && magic[1] == 0x61.toByte() &&
+                magic[2] == 0x72.toByte() && magic[3] == 0x21.toByte() &&
+                magic[4] == 0x1A.toByte() && magic[5] == 0x07.toByte() &&
+                magic[6] == 0x01.toByte() && magic[7] == 0x00.toByte()
+        }
+    } catch (e: Exception) { false }
+}
 
 fun isImage(f: File) = f.extensionLower() in setOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "heic")
 fun isVideo(f: File) = f.extensionLower() in setOf("mp4", "mkv", "webm", "mov", "avi", "3gp")
@@ -215,7 +267,9 @@ object FileRepo {
         } catch (e: Exception) { null }
     }
 
-    fun storageStats(): StorageStats {
+    // v1.17: suspend + IO — the old call ran StatFs and read /proc/mounts
+    // on the main thread during the first composition (Home + Analyzer).
+    suspend fun storageStats(): StorageStats = withContext(Dispatchers.IO) {
         val stat = StatFs(internalRoot().path)
         val partitionTotal = stat.blockCountLong * stat.blockSizeLong
         val free = stat.availableBlocksLong * stat.blockSizeLong
@@ -225,7 +279,7 @@ object FileRepo {
         // which is what Settings and Files by Google show (~42 GB on this
         // phone). The old headline (device total - free) counted the system
         // partition too, so it read ~14 GB higher than Settings.
-        return StorageStats(deviceTotal, free, partitionTotal - free, system, partitionTotal)
+        StorageStats(deviceTotal, free, partitionTotal - free, system, partitionTotal)
     }
 
     suspend fun listFiles(dir: File, sort: SortMode, query: String, showHidden: Boolean): List<File> =
@@ -299,6 +353,10 @@ object FileRepo {
                             val f = File(path)
                             if (f.isFile) out.add(f)
                         }
+                        // v1.17: stop walking the cursor once we have the
+                        // cap — the old code scanned the whole table first
+                        // and only then took 500.
+                        if (out.size >= 500) break
                     }
                 }
                 return out.take(500)
@@ -342,14 +400,17 @@ object FileRepo {
     suspend fun searchFiles(dir: File, query: String, showHidden: Boolean, limit: Int = 300): List<File> =
         withContext(Dispatchers.IO) {
             val out = mutableListOf<File>()
-            dir.walkTopDown()
-                .onEnter { d -> d.name != "Android" && (showHidden || !d.name.startsWith(".")) }
-                .forEach { f ->
-                    if (f.isFile && f.name.contains(query, ignoreCase = true)) {
-                        out.add(f)
-                        if (out.size >= limit) return@withContext out.sortedByDescending { it.lastModified() }
-                    }
+            var checked = 0
+            // Plain for loop: ensureActive() only resolves in the
+            // withContext scope, not inside a forEach lambda.
+            for (f in dir.walkTopDown()
+                .onEnter { d -> d.name != "Android" && (showHidden || !d.name.startsWith(".")) }) {
+                if (++checked % 500 == 0) ensureActive()
+                if (f.isFile && f.name.contains(query, ignoreCase = true)) {
+                    out.add(f)
+                    if (out.size >= limit) return@withContext out.sortedByDescending { it.lastModified() }
                 }
+            }
             out.sortedByDescending { it.lastModified() }
         }
 
@@ -373,6 +434,9 @@ object FileRepo {
                     if (path.split("/").any { it.startsWith(".") }) continue
                     val f = File(path)
                     if (f.isFile) out.add(f)
+                    // v1.17: the cursor is date-desc, so the first `limit`
+                    // valid files ARE the answer — don't scan the whole table.
+                    if (out.size >= limit) break
                 }
             }
             out.take(limit)
@@ -396,13 +460,23 @@ object FileRepo {
 
     suspend fun folderSize(dir: File): Long = withContext(Dispatchers.IO) {
         var total = 0L
-        dir.walkTopDown().forEach { if (it.isFile) total += it.length() }
+        var n = 0
+        for (f in dir.walkTopDown()) {
+            // v1.17: a walk with no cancellation check runs to completion
+            // even after the screen is gone.
+            if (++n % 500 == 0) ensureActive()
+            if (f.isFile) total += f.length()
+        }
         total
     }
 
     suspend fun largeFiles(dir: File, limit: Int = 20): List<File> = withContext(Dispatchers.IO) {
         val all = mutableListOf<File>()
-        dir.walkTopDown().forEach { if (it.isFile && it.length() > 50L * 1024 * 1024) all.add(it) }
+        var n = 0
+        for (f in dir.walkTopDown()) {
+            if (++n % 500 == 0) ensureActive()
+            if (f.isFile && f.length() > 50L * 1024 * 1024) all.add(f)
+        }
         all.sortedByDescending { it.length() }.take(limit)
     }
 
@@ -412,7 +486,10 @@ object FileRepo {
             var scanned = 0
             // Plain for loop (not forEach): ensureActive() only resolves in
             // the withContext scope, not inside a forEach lambda.
-            for (f in dir.walkTopDown()) {
+            // v1.17: skip Android/ (app-private data the user shouldn't
+            // delete) and hidden dirs — the old scan hashed all of them.
+            for (f in dir.walkTopDown()
+                .onEnter { d -> d.name != "Android" && !d.name.startsWith(".") }) {
                 if (f.isFile && f.length() > 0) {
                     bySize.getOrPut(f.length()) { mutableListOf() }.add(f)
                     scanned++
@@ -425,8 +502,13 @@ object FileRepo {
                 if (files.size < 2) continue
                 val byHash = mutableMapOf<String, MutableList<File>>()
                 for (f in files) {
-                    val h = hashFile(f)
-                    if (h != null) byHash.getOrPut(h) { mutableListOf() }.add(f)
+                    // v1.17: Stop did nothing during hashing — the loop
+                    // never checked cancellation. And a null hash (unreadable
+                    // file) used to group every unreadable file together
+                    // as "duplicates" of each other; skip those.
+                    ensureActive()
+                    val h = hashFile(f) ?: continue
+                    byHash.getOrPut(h) { mutableListOf() }.add(f)
                 }
                 for ((_, dups) in byHash) if (dups.size > 1) groups.add(DuplicateGroup(size, dups))
             }
@@ -452,41 +534,60 @@ object FileRepo {
                 val destCanon = destDir.canonicalPath
                 var allOk = true
                 files.forEachIndexed { idx, src ->
-                    // v1.15: never copy/move a folder into itself — that
-                    // recursed forever and filled the storage with junk.
-                    val srcCanon = src.canonicalPath
-                    if (destCanon == srcCanon || destCanon.startsWith("$srcCanon${File.separator}")) {
-                        // v1.16: skip just this item instead of aborting the
-                        // whole batch — the other files are still valid.
-                        allOk = false
-                        onProgress(idx + 1, files.size)
-                        return@forEachIndexed
+                    var ok = true
+                    try {
+                        // v1.15: never copy/move a folder into itself — that
+                        // recursed forever and filled the storage with junk.
+                        val srcCanon = src.canonicalPath
+                        if (destCanon == srcCanon || destCanon.startsWith("$srcCanon${File.separator}")) {
+                            // v1.16: skip just this item instead of aborting the
+                            // whole batch — the other files are still valid.
+                            allOk = false
+                            onProgress(idx + 1, files.size)
+                            return@forEachIndexed
+                        }
+                        // v1.16: moving a file into the folder it already lives
+                        // in is a no-op — the old code renamed it to
+                        // "name (1).ext" and deleted the original.
+                        if (move && src.parentFile?.canonicalPath == destCanon) {
+                            onProgress(idx + 1, files.size)
+                            return@forEachIndexed
+                        }
+                        // v1.13: never silently overwrite — a same-named file in
+                        // the destination gets "name (1).ext" instead of being
+                        // destroyed by the paste.
+                        val dest = nonCollidingDest(destDir, src.name)
+                        if (src.isDirectory) copyDir(src, dest) else copyFile(src, dest)
+                        // v1.17: verify the copy before touching the
+                        // original — a partial copy + delete is data loss.
+                        // And verify the move-delete: a "move" that leaves
+                        // the original behind is a copy that lies about it.
+                        if (!dest.exists() || (src.isFile && dest.length() != src.length())) {
+                            runCatching { deleteRecursively(dest) }
+                            ok = false
+                        } else if (move) {
+                            ok = deleteRecursively(src)
+                            if (!ok) runCatching { deleteRecursively(dest) }
+                        }
+                    } catch (e: Exception) {
+                        ok = false
                     }
-                    // v1.16: moving a file into the folder it already lives
-                    // in is a no-op — the old code renamed it to
-                    // "name (1).ext" and deleted the original.
-                    if (move && src.parentFile?.canonicalPath == destCanon) {
-                        onProgress(idx + 1, files.size)
-                        return@forEachIndexed
-                    }
-                    // v1.13: never silently overwrite — a same-named file in
-                    // the destination gets "name (1).ext" instead of being
-                    // destroyed by the paste.
-                    val dest = nonCollidingDest(destDir, src.name)
-                    if (src.isDirectory) copyDir(src, dest) else copyFile(src, dest)
-                    if (move) deleteRecursively(src)
+                    if (!ok) allOk = false
                     onProgress(idx + 1, files.size)
                 }
                 allOk
             } catch (e: Exception) { false }
         }
 
-    /** A destination name that does not overwrite an existing file. */
+    /** A destination name that does not overwrite an existing file.
+     *  v1.17: a leading-dot file (".gitignore") used to collide into
+     *  " (1).gitignore" — the dot at index 0 is not an extension split. */
     fun nonCollidingDest(dir: File, name: String): File {
         var dest = File(dir, name)
         if (!dest.exists()) return dest
-        val base = name.substringBeforeLast('.', name)
-        val ext = if ('.' in name) ".${name.substringAfterLast('.')}" else ""
+        val dot = name.lastIndexOf('.')
+        val base = if (dot <= 0) name else name.substring(0, dot)
+        val ext = if (dot <= 0) "" else name.substring(dot)
         var n = 1
         while (dest.exists()) {
             dest = File(dir, "$base ($n)$ext")
@@ -507,9 +608,11 @@ object FileRepo {
         }
     }
 
-    fun deleteRecursively(f: File) {
+    // v1.17: returns whether the file is really gone — every caller used
+    // to ignore the result and report success on failure.
+    fun deleteRecursively(f: File): Boolean {
         if (f.isDirectory) f.listFiles()?.forEach { deleteRecursively(it) }
-        f.delete()
+        return !f.exists() || f.delete()
     }
 
     // ---- v1.7: Trash remembers where each file came from ----
@@ -518,9 +621,11 @@ object FileRepo {
     private fun trashIndex(context: Context) =
         context.getSharedPreferences("nova_files_trash", Context.MODE_PRIVATE)
 
-    fun deleteFromTrash(context: Context, file: File) {
-        deleteRecursively(file)
-        trashIndex(context).edit().remove(file.name).apply()
+    fun deleteFromTrash(context: Context, file: File): Boolean {
+        // v1.17: only forget the index entry when the file is really gone.
+        val ok = deleteRecursively(file)
+        if (ok) trashIndex(context).edit().remove(file.name).apply()
+        return ok
     }
 
     suspend fun moveToTrash(context: Context, files: List<File>): Boolean = withContext(Dispatchers.IO) {
@@ -528,16 +633,31 @@ object FileRepo {
             val trash = trashDir(context)
             val stamp = System.currentTimeMillis()
             val index = trashIndex(context).edit()
+            var allOk = true
             files.forEachIndexed { idx, src ->
                 // v1.15: the stamp alone collides when two same-named files
                 // are trashed together — the index makes each dest unique.
                 val dest = File(trash, "${stamp}_${idx}_${src.name}")
-                if (src.isDirectory) copyDir(src, dest) else copyFile(src, dest)
-                deleteRecursively(src)
-                index.putString(dest.name, src.parentFile?.absolutePath ?: "")
+                var ok = false
+                try {
+                    if (src.isDirectory) copyDir(src, dest) else copyFile(src, dest)
+                    // v1.17: verify the copy before deleting the original,
+                    // and verify the delete — the old code indexed the file
+                    // and reported success even when the original was still
+                    // sitting in place (copy ok, delete failed = duplicates).
+                    ok = dest.exists() && (!src.isFile || dest.length() == src.length())
+                    if (ok) ok = deleteRecursively(src)
+                } catch (e: Exception) { ok = false }
+                if (ok) {
+                    index.putString(dest.name, src.parentFile?.absolutePath ?: "")
+                } else {
+                    allOk = false
+                    runCatching { deleteRecursively(dest) }
+                    ErrorLog.log(context, "Trash", "Failed to move ${src.name} to Trash")
+                }
             }
             index.apply()
-            true
+            allOk
         } catch (e: Exception) { false }
     }
 
@@ -546,10 +666,13 @@ object FileRepo {
     }
 
     /** The original name of a trashed file, for display: strip the numeric
-     *  "<stamp>_<index>_" (v1.15) or "<stamp>_" (v1.14) prefix. */
+     *  "<stamp>_<index>_" (v1.15) or "<stamp>_" (v1.14) prefix.
+     *  v1.17: the stamp is a 13-digit millisecond timestamp — requiring all
+     *  13 digits means a user's own file called "123_report.pdf" no longer
+     *  displays (and restores) as "report.pdf". */
     fun trashDisplayName(trashName: String): String =
-        Regex("^\\d+_\\d+_(.*)$").find(trashName)?.groupValues?.get(1)
-            ?: Regex("^\\d+_(.*)$").find(trashName)?.groupValues?.get(1)
+        Regex("^\\d{13}_\\d+_(.*)$").find(trashName)?.groupValues?.get(1)
+            ?: Regex("^\\d{13}_(.*)$").find(trashName)?.groupValues?.get(1)
             ?: trashName
 
     suspend fun restoreFromTrash(context: Context, file: File): Boolean = withContext(Dispatchers.IO) {
@@ -569,7 +692,18 @@ object FileRepo {
                 nonCollidingDest(internalRoot(), name)
             }
             if (file.isDirectory) copyDir(file, dest) else copyFile(file, dest)
-            deleteFromTrash(context, file)
+            // v1.17: verify the copy before removing the trash entry, and
+            // verify the trash removal — a failed delete used to leave the
+            // file in both places while reporting success.
+            val copied = dest.exists() && (!file.isFile || dest.length() == file.length())
+            if (!copied) {
+                runCatching { deleteRecursively(dest) }
+                return@withContext false
+            }
+            if (!deleteFromTrash(context, file)) {
+                runCatching { deleteRecursively(dest) }
+                return@withContext false
+            }
             true
         } catch (e: Exception) { false }
     }
@@ -603,6 +737,10 @@ object FileRepo {
     private fun addToZip(f: File, base: String, zos: ZipOutputStream) {
         val entryName = if (base.isEmpty()) f.name else "$base/${f.name}"
         if (f.isDirectory) {
+            // v1.17: write the directory entry itself, or empty folders
+            // vanish from the ZIP entirely.
+            zos.putNextEntry(ZipEntry("$entryName/"))
+            zos.closeEntry()
             f.listFiles()?.forEach { addToZip(it, entryName, zos) }
         } else {
             zos.putNextEntry(ZipEntry(entryName))
@@ -641,16 +779,53 @@ object FileRepo {
 
     // Share files with other apps (moved here from BrowserScreen so the
     // viewer and the analyzer can use it too).
-    fun shareFiles(context: Context, files: List<File>) {
-        try {
-            val uris = files.map { FileProvider.getUriForFile(context, "com.nova.files.provider", it) }
-            val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                type = "*/*"
-                putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+    // v1.17: the old version silently did nothing on many phones. Three
+    // real defects: (1) it used ACTION_SEND_MULTIPLE even for ONE file, so
+    // the share sheet filtered out apps that only handle ACTION_SEND;
+    // (2) it never set ClipData, so the URI-permission grant often never
+    // reached the app the user picked — the chooser opened, the file never
+    // attached; (3) every failure was swallowed by an empty catch, so the
+    // user saw nothing and the Error log recorded nothing. Returns false
+    // when nothing could be shared, so callers can say so.
+    fun shareFiles(context: Context, files: List<File>): Boolean {
+        val shareable = files.filter { it.isFile && it.exists() }
+        if (shareable.isEmpty()) return false
+        return try {
+            val uris = shareable.map { FileProvider.getUriForFile(context, "com.nova.files.provider", it) }
+            val mime = if (shareable.size == 1) {
+                android.webkit.MimeTypeMap.getSingleton()
+                    .getMimeTypeFromExtension(shareable[0].extensionLower()) ?: "*/*"
+            } else "*/*"
+            val intent = Intent(
+                if (shareable.size == 1) Intent.ACTION_SEND else Intent.ACTION_SEND_MULTIPLE
+            ).apply {
+                type = mime
+                if (shareable.size == 1) {
+                    putExtra(Intent.EXTRA_STREAM, uris[0])
+                } else {
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+                }
+                // ClipData is how the URI-permission grant reaches the
+                // target app for EXTRA_STREAM URIs — the flag alone is
+                // not enough on several OEMs.
+                clipData = android.content.ClipData.newUri(
+                    context.contentResolver, "Shared files", uris[0]
+                ).apply {
+                    for (i in 1 until uris.size) addItem(
+                        android.content.ClipData.Item(uris[i])
+                    )
+                }
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                if (context !is android.app.Activity) {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
             }
             context.startActivity(Intent.createChooser(intent, "Share"))
-        } catch (e: Exception) { /* nothing shareable */ }
+            true
+        } catch (e: Exception) {
+            ErrorLog.log(context, "Share", "Failed to share ${shareable.size} file(s)", e)
+            false
+        }
     }
 
     // ---- v1.7: extract ZIP, 7z, RAR, TAR, TAR.GZ ----
@@ -659,6 +834,9 @@ object FileRepo {
     // RAR via junrar, TAR/TAR.GZ via Commons Compress.
     suspend fun extractArchive(archive: File, destDir: File): Boolean = withContext(Dispatchers.IO) {
         try {
+            // v1.17: junrar cannot read RAR5 at all — refuse fast instead
+            // of failing inside the extractor with a generic error.
+            if (archive.extensionLower() == "rar" && isRar5(archive)) return@withContext false
             when (archive.extensionLower()) {
                 "zip" -> unzip(archive, destDir)
                 "7z" -> extract7z(archive, destDir)
@@ -804,19 +982,51 @@ object FileRepo {
     fun vaultPinHash(context: Context): String? =
         context.getSharedPreferences("nova_files", Context.MODE_PRIVATE).getString("vault_pin", null)
 
+    // v1.17: the vault PIN is now salted. v1 stored a bare unsalted
+    // SHA-256 hex — anyone who reads the backup (or the prefs file) can
+    // crack a 4–6 digit PIN offline in seconds by hashing 0000–999999.
+    // Format: "v2:<salt hex>:<SHA-256(salt + pin) hex>". An old v1 hash is
+    // still accepted once, then migrated to the salted format on the spot.
     fun setVaultPin(context: Context, pin: String) {
-        val hash = MessageDigest.getInstance("SHA-256").digest(pin.toByteArray())
-            .joinToString("") { "%02x".format(it) }
+        val salt = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
+        val stored = "v2:${salt.toHex()}:${pinHash(pin, salt)}"
         context.getSharedPreferences("nova_files", Context.MODE_PRIVATE)
-            .edit().putString("vault_pin", hash).apply()
+            .edit().putString("vault_pin", stored).apply()
     }
 
     fun checkVaultPin(context: Context, pin: String): Boolean {
         val saved = vaultPinHash(context) ?: return false
-        val hash = MessageDigest.getInstance("SHA-256").digest(pin.toByteArray())
-            .joinToString("") { "%02x".format(it) }
-        return hash == saved
+        return if (saved.startsWith("v2:")) {
+            val parts = saved.split(":")
+            if (parts.size != 3) return false
+            val salt = parts[1].hexToBytes() ?: return false
+            val expected = parts[2].hexToBytes() ?: return false
+            val actual = pinHash(pin, salt).hexToBytes() ?: return false
+            MessageDigest.isEqual(expected, actual)
+        } else {
+            val hash = MessageDigest.getInstance("SHA-256").digest(pin.toByteArray()).toHex()
+            val ok = MessageDigest.isEqual(
+                saved.lowercase().toByteArray(), hash.lowercase().toByteArray()
+            )
+            // Migrate the old unsalted hash away on a successful unlock.
+            if (ok) setVaultPin(context, pin)
+            ok
+        }
     }
+
+    private fun pinHash(pin: String, salt: ByteArray): String {
+        val md = MessageDigest.getInstance("SHA-256")
+        md.update(salt)
+        md.update(pin.toByteArray())
+        return md.digest().toHex()
+    }
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+
+    private fun String.hexToBytes(): ByteArray? = runCatching {
+        require(length % 2 == 0)
+        ByteArray(length / 2) { i -> substring(i * 2, i * 2 + 2).toInt(16).toByte() }
+    }.getOrNull()
 
     // v1.10: remove the vault PIN entirely. The next Vault entry then shows
     // the setup screen ("Set a vault PIN") — there is never an auto PIN.
@@ -839,36 +1049,48 @@ object ErrorLog {
     private const val MAX_ENTRIES = 100
     private const val SEPARATOR = "\n---\n"
 
+    // v1.17: read-modify-write with no lock — two threads logging at once
+    // interleaved and silently lost entries.
+    private val lock = Any()
+
     private fun file(context: Context): File = File(context.filesDir, FILE_NAME)
 
     fun log(context: Context, tag: String, message: String, e: Throwable? = null) {
-        try {
-            val time = SimpleDateFormat("dd MMM HH:mm:ss", Locale.getDefault()).format(Date())
-            val detail = e?.let {
-                "\n${it.javaClass.simpleName}: ${it.message}\n" +
-                    it.stackTraceToString().lines().take(12).joinToString("\n")
-            } ?: ""
-            val entry = "[$time] $tag: $message$detail"
-            val f = file(context)
-            val existing = if (f.exists()) f.readText() else ""
-            val all = (if (existing.isBlank()) emptyList() else existing.split(SEPARATOR)) + entry
-            f.writeText(all.takeLast(MAX_ENTRIES).joinToString(SEPARATOR))
-        } catch (_: Exception) { /* the log itself must never crash the app */ }
+        synchronized(lock) {
+            try {
+                val time = SimpleDateFormat("dd MMM HH:mm:ss", Locale.getDefault()).format(Date())
+                val detail = e?.let {
+                    "\n${it.javaClass.simpleName}: ${it.message}\n" +
+                        it.stackTraceToString().lines().take(12).joinToString("\n")
+                } ?: ""
+                val entry = "[$time] $tag: $message$detail"
+                val f = file(context)
+                val existing = if (f.exists()) f.readText() else ""
+                val all = (if (existing.isBlank()) emptyList() else existing.split(SEPARATOR)) + entry
+                f.writeText(all.takeLast(MAX_ENTRIES).joinToString(SEPARATOR))
+            } catch (_: Exception) { /* the log itself must never crash the app */ }
+        }
     }
 
     /** Newest first. */
-    fun read(context: Context): List<String> = try {
-        val f = file(context)
-        if (!f.exists()) emptyList()
-        else f.readText().split(SEPARATOR).map { it.trim() }.filter { it.isNotEmpty() }.asReversed()
-    } catch (_: Exception) { emptyList() }
+    fun read(context: Context): List<String> = synchronized(lock) {
+        try {
+            val f = file(context)
+            if (!f.exists()) emptyList()
+            else f.readText().split(SEPARATOR).map { it.trim() }.filter { it.isNotEmpty() }.asReversed()
+        } catch (_: Exception) { emptyList() }
+    }
 
-    fun count(context: Context): Int = try {
-        val f = file(context)
-        if (!f.exists()) 0 else f.readText().split(SEPARATOR).count { it.isNotBlank() }
-    } catch (_: Exception) { 0 }
+    fun count(context: Context): Int = synchronized(lock) {
+        try {
+            val f = file(context)
+            if (!f.exists()) 0 else f.readText().split(SEPARATOR).count { it.isNotBlank() }
+        } catch (_: Exception) { 0 }
+    }
 
     fun clear(context: Context) {
-        try { file(context).delete() } catch (_: Exception) { }
+        synchronized(lock) {
+            try { file(context).delete() } catch (_: Exception) { }
+        }
     }
 }

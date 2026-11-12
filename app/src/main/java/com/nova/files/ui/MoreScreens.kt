@@ -11,6 +11,7 @@ import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -44,7 +45,9 @@ fun AnalyzerScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var stats by remember { mutableStateOf(FileRepo.storageStats()) }
+    // v1.17: storageStats() used to run during the first composition (main
+    // thread disk I/O) — start empty and fill it in from IO instead.
+    var stats by remember { mutableStateOf(StorageStats(0, 0, 0, 0, 0)) }
     var folders by remember { mutableStateOf<List<Pair<File, Long?>>>(emptyList()) }
     var large by remember { mutableStateOf<List<File>>(emptyList()) }
     var dups by remember { mutableStateOf<List<DuplicateGroup>>(emptyList()) }
@@ -79,12 +82,24 @@ fun AnalyzerScreen(
         item {
             Text("Storage analyzer", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            Text("Used ${formatSizeDecimal(stats.usedBytes)} of ${formatSizeDecimal(stats.totalBytes)} • Free ${formatSizeDecimal(stats.freeBytes)}")
+            // v1.17: usedBytes is the USERDATA used and totalBytes is the
+            // whole chip — "Used 42 GB of 256 GB" mixed the two, so
+            // used + free never added up to the total shown. Compare used
+            // against the userdata partition, and show the system slice
+            // separately like Home does.
+            Text("Used ${formatSizeDecimal(stats.usedBytes)} of ${formatSizeDecimal(stats.partitionTotalBytes)} user storage • Free ${formatSizeDecimal(stats.freeBytes)}")
+            if (stats.systemBytes > 0) {
+                Text(
+                    "System ${formatSizeDecimal(stats.systemBytes)} • ${formatSizeDecimal(stats.totalBytes)} total on device",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
             if (scanning) { Spacer(Modifier.height(8.dp)); LinearProgressIndicator(Modifier.fillMaxWidth()) }
             if (status.isNotBlank()) { Spacer(Modifier.height(8.dp)); Text(status, color = MaterialTheme.colorScheme.primary) }
         }
         item { Text("Biggest folders", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-        items(folders.take(12)) { (dir, size) ->
+        items(folders.take(12), key = { it.first.absolutePath }) { (dir, size) ->
             ListItem(
                 headlineContent = { Text(dir.name) },
                 supportingContent = { Text(size?.let { formatSize(it) } ?: "calculating…") },
@@ -93,7 +108,7 @@ fun AnalyzerScreen(
             )
         }
         item { Text("Large files (over 50 MB)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-        items(large) { f ->
+        items(large, key = { it.absolutePath }) { f ->
             ListItem(
                 headlineContent = { Text(f.name) },
                 supportingContent = { Text("${formatSize(f.length())} • ${f.parentFile?.name}") },
@@ -123,7 +138,7 @@ fun AnalyzerScreen(
             ) { Text(if (dupScanning) "Stop scan" else "Find duplicate files") }
             if (scanStatus.isNotBlank()) { Spacer(Modifier.height(8.dp)); Text(scanStatus) }
         }
-        items(dups) { group ->
+        items(dups, key = { it.files.firstOrNull()?.absolutePath ?: it.hashCode().toString() }) { group ->
             Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                 Column(Modifier.padding(12.dp)) {
                     Text("${group.files.size} copies • ${formatSize(group.size)} each", fontWeight = FontWeight.Bold)
@@ -185,7 +200,7 @@ fun TrashScreen() {
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("Trash") }, actions = {
-            TextButton(onClick = { emptyConfirm = true }) { Text("Empty all") }
+            TextButton(onClick = { emptyConfirm = true }, enabled = trash.isNotEmpty()) { Text("Empty all") }
         }) }
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
@@ -196,7 +211,7 @@ fun TrashScreen() {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Trash is empty") }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(trash) { f ->
+                    items(trash, key = { it.absolutePath }) { f ->
                         ListItem(
                             // v1.16: trash names are <stamp>_<index>_<name>
                             // (v1.15) or <stamp>_<name> (v1.14) — strip both
@@ -252,6 +267,21 @@ fun TrashScreen() {
 }
 
 // ---------- Vault ----------
+/** Fingerprint availability, checked fresh each time (v1.17) — the old
+ *  code computed it once with remember and it went stale. */
+private fun isBiometricAvailable(context: Context): Boolean {
+    return try {
+        androidx.biometric.BiometricManager.from(context)
+            .canAuthenticate(androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
+            androidx.biometric.BiometricManager.BIOMETRIC_SUCCESS
+    } catch (t: Throwable) {
+        // v1.11: catch Throwable, not just Exception — an Error (e.g. a
+        // missing class) must also degrade to PIN instead of crashing.
+        ErrorLog.log(context, "Vault", "Fingerprint check failed", t)
+        false
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun VaultScreen(onOpenFile: (File) -> Unit) {
@@ -280,6 +310,9 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
         mainActivity.clearVaultImportUri()
         scope.launch {
             val result = withContext(Dispatchers.IO) {
+                // v1.17: a failed import used to leave a partial file in
+                // the vault — delete it on failure.
+                var dest: File? = null
                 try {
                     // Real filename, not the SAF document id (lastPathSegment
                     // gives "msf:123" for content URIs).
@@ -294,7 +327,7 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                             }
                         }
                     } catch (_: Exception) { }
-                    val dest = FileRepo.nonCollidingDest(FileRepo.vaultDir(context), name)
+                    dest = FileRepo.nonCollidingDest(FileRepo.vaultDir(context), name)
                     context.contentResolver.openInputStream(uri)?.use { ins ->
                         dest.outputStream().use { out -> ins.copyTo(out) }
                     } ?: return@withContext "Import failed — couldn't read the file"
@@ -309,6 +342,7 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                     } catch (_: Exception) { false }
                     if (deleted) "Imported to Vault" else "Imported — delete the original yourself, it is still visible to other apps"
                 } catch (e: Exception) {
+                    dest?.let { runCatching { it.delete() } }
                     ErrorLog.log(context, "Vault", "Import failed", e)
                     "Import failed: ${e.message ?: e.javaClass.simpleName}"
                 }
@@ -325,19 +359,16 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
     // recommended form with a negative button), and cancelling it or
     // tapping "Use PIN" no longer shows a scary error message.
     val activity = LocalContext.current as? androidx.fragment.app.FragmentActivity
-    val biometricAvailable = remember {
-        try {
-            androidx.biometric.BiometricManager.from(context)
-                .canAuthenticate(androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
-                androidx.biometric.BiometricManager.BIOMETRIC_SUCCESS
-        } catch (t: Throwable) {
-            // v1.11: catch Throwable, not just Exception — an Error (e.g. a
-            // missing class) must also degrade to PIN instead of crashing.
-            ErrorLog.log(context, "Vault", "Fingerprint check failed", t)
-            false
-        }
-    }
+    // v1.17: availability was computed once per composition and went stale
+    // (e.g. after enrolling a fingerprint in Settings while the app was
+    // open). Recompute whenever the lock screen shows again, and re-check
+    // at the moment the button is tapped.
+    val biometricAvailable = remember(unlocked) { isBiometricAvailable(context) }
     fun launchFingerprint(onSuccess: () -> Unit) {
+        if (!isBiometricAvailable(context)) {
+            error = "Fingerprint is not set up — use your PIN"
+            return
+        }
         val act = activity
         if (act == null) { error = "Fingerprint unavailable — use your PIN"; return }
         try {
@@ -463,7 +494,7 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Vault is empty. Tap Import to add files.") }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(files) { f ->
+                    items(files, key = { it.absolutePath }) { f ->
                         ListItem(
                             headlineContent = { Text(f.name) },
                             supportingContent = { Text(formatSize(f.length())) },
@@ -474,7 +505,15 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                                     TextButton(onClick = { deleteTarget = f }) { Text("Delete") }
                                 }
                             },
-                            modifier = Modifier.clickable { if (isImage(f)) onOpenFile(f) }
+                            // v1.17: only images and text open inside the
+                            // Vault — the old code silently did nothing for
+                            // every other type. Other types must be moved
+                            // out first (opening them in another app would
+                            // hand a private vault file to that app).
+                            modifier = Modifier.clickable {
+                                if (isImage(f) || f.extensionLower() == "txt") onOpenFile(f)
+                                else status = "Only images and text open inside the Vault — move it out to open it elsewhere"
+                            }
                         )
                     }
                 }
@@ -508,8 +547,11 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
             confirmButton = {
                 TextButton(onClick = {
                     scope.launch {
-                        withContext(Dispatchers.IO) { FileRepo.deleteRecursively(target) }
-                        status = "Deleted from vault"; deleteTarget = null; load()
+                        // v1.17: report the real result — the old code said
+                        // "Deleted from vault" even when the delete failed.
+                        val ok = withContext(Dispatchers.IO) { FileRepo.deleteRecursively(target) }
+                        status = if (ok) "Deleted from vault" else "Couldn't delete from vault"
+                        deleteTarget = null; load()
                     }
                 }) { Text("Delete") }
             },
@@ -612,16 +654,28 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
 @Composable
 fun ViewerScreen(
     file: File, files: List<File> = listOf(file), index: Int = 0,
-    onNavigate: (Int) -> Unit = {}, onBack: () -> Unit
+    onNavigate: (Int) -> Unit = {}, onBack: () -> Unit,
+    // v1.17: vault files must not be shared — sharing hands the private
+    // file to another app, which defeats the Vault.
+    isVault: Boolean = false
 ) {
     val context = LocalContext.current
     var text by remember { mutableStateOf<String?>(null) }
+    var status by remember { mutableStateOf("") }
     // v1.7: pinch-to-zoom for images (v1.0–v1.6 showed them fixed-size).
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     val transformState = rememberTransformableState { zoomChange, panChange, _ ->
         scale = (scale * zoomChange).coerceIn(1f, 5f)
-        offset = if (scale <= 1f) Offset.Zero else offset + panChange
+        // v1.17: pan was unbounded — a zoomed photo could be pushed
+        // off-screen with no way back except leaving the file.
+        offset = if (scale <= 1f) Offset.Zero else {
+            val bound = 1000f * (scale - 1f)
+            Offset(
+                (offset.x + panChange.x).coerceIn(-bound, bound),
+                (offset.y + panChange.y).coerceIn(-bound, bound)
+            )
+        }
     }
     LaunchedEffect(file) {
         scale = 1f; offset = Offset.Zero
@@ -652,11 +706,16 @@ fun ViewerScreen(
                         Icon(Icons.Filled.ChevronRight, "Next")
                     }
                 }
-                IconButton(onClick = { FileRepo.shareFiles(context, listOf(file)) }) { Icon(Icons.Filled.Share, "Share") }
+                if (!isVault) {
+                    IconButton(onClick = { if (!FileRepo.shareFiles(context, listOf(file))) status = "Couldn't share this file" }) { Icon(Icons.Filled.Share, "Share") }
+                }
             }
         )
     }) { padding ->
-        Box(Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.padding(padding).fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
             when {
                 isImage(file) -> AsyncImage(
                     model = file, contentDescription = file.name,
@@ -666,6 +725,14 @@ fun ViewerScreen(
                 )
                 text != null -> Text(text!!, modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()))
                 else -> Text("Preview not available for this file type", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            // v1.17: the viewer never showed its status text (e.g. a failed
+            // share), so failures were invisible.
+            if (status.isNotBlank()) {
+                Text(
+                    status, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp)
+                )
             }
         }
     }
@@ -684,12 +751,17 @@ fun ErrorLogScreen(onBack: () -> Unit) {
                 title = { Text("Error log") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Filled.ArrowBack, "Back") } },
                 actions = {
-                    TextButton(onClick = {
-                        val text = entries.joinToString("\n---\n")
-                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        cm.setPrimaryClip(ClipData.newPlainText("NOVA Files error log", text))
-                        status = "Copied — paste it in a message to share it"
-                    }) { Text("Copy") }
+                    TextButton(
+                        onClick = {
+                            val text = entries.joinToString("\n---\n")
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            cm.setPrimaryClip(ClipData.newPlainText("NOVA Files error log", text))
+                            status = "Copied — paste it in a message to share it"
+                        },
+                        // v1.17: Copy on an empty log copied nothing and
+                        // still said "Copied".
+                        enabled = entries.isNotEmpty()
+                    ) { Text("Copy") }
                     TextButton(onClick = {
                         ErrorLog.clear(context)
                         entries = emptyList()
@@ -713,7 +785,9 @@ fun ErrorLogScreen(onBack: () -> Unit) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No errors recorded.") }
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(entries) { e ->
+                    // Index keys: two entries can have identical text (same
+                    // second, same message), and duplicate keys crash the list.
+                    itemsIndexed(entries, key = { index, _ -> index }) { _, e ->
                         Card(Modifier.fillMaxWidth()) {
                             Text(e, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
                         }

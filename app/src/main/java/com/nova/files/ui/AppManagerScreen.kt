@@ -16,6 +16,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.nova.files.data.AppInfo
 import com.nova.files.data.AppRepo
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +51,17 @@ fun AppManagerScreen(onBack: () -> Unit) {
         }
     }
     LaunchedEffect(Unit) { load() }
+
+    // v1.17: refresh when returning from the system uninstaller — the old
+    // list kept showing an app that was just uninstalled.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) load()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val visible = remember(apps, query, showSystem) {
         apps.filter { app ->

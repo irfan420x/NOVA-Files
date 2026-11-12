@@ -31,7 +31,9 @@ import com.nova.files.data.extensionLower
 import com.nova.files.data.formatSize
 import com.nova.files.data.formatSizeDecimal
 import com.nova.files.data.isImage
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -50,7 +52,9 @@ fun HomeScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var stats by remember { mutableStateOf(FileRepo.storageStats()) }
+    // v1.17: storageStats() used to run during the first composition (main
+    // thread disk I/O) — start empty and fill it in from IO instead.
+    var stats by remember { mutableStateOf(com.nova.files.data.StorageStats(0, 0, 0, 0, 0)) }
     var counts by remember { mutableStateOf<CategoryCounts?>(null) }
     var recents by remember { mutableStateOf<List<File>>(emptyList()) }
     var volumes by remember { mutableStateOf<List<StorageVolumeInfo>>(emptyList()) }
@@ -68,7 +72,7 @@ fun HomeScreen(
         stats = FileRepo.storageStats()
         counts = FileRepo.categoryCounts(context)
         recents = FileRepo.recentFiles(context)
-        errorCount = com.nova.files.data.ErrorLog.count(context)
+        errorCount = withContext(Dispatchers.IO) { com.nova.files.data.ErrorLog.count(context) }
         loadVolumes()
         refreshing = false
     }
@@ -163,7 +167,7 @@ fun HomeScreen(
             }
         }
         // Removable volumes (USB OTG / memory cards) — tap to browse them.
-        items(volumes) { vol ->
+        items(volumes, key = { it.dir.absolutePath }) { vol ->
             val volPct = if (vol.totalBytes > 0) (vol.usedBytes * 100 / vol.totalBytes).toInt() else 0
             Card(
                 Modifier.fillMaxWidth().clickable { onOpenDir(vol.dir) },
@@ -195,7 +199,7 @@ fun HomeScreen(
             }
         }
         item { Text("Categories", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-        items(categories.chunked(2)) { row ->
+        items(categories.chunked(2), key = { it.first().id }) { row ->
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 row.forEach { cat ->
                     Card(
@@ -217,7 +221,7 @@ fun HomeScreen(
         if (recents.isEmpty()) {
             item { Text("No recent files", color = MaterialTheme.colorScheme.onSurfaceVariant) }
         }
-        items(recents.take(10)) { f ->
+        items(recents.take(10), key = { it.absolutePath }) { f ->
             ListItem(
                 headlineContent = { Text(f.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 supportingContent = { Text("${formatSize(f.length())} • ${com.nova.files.data.fileKind(f)} • ${dateFmt.format(Date(f.lastModified()))}") },
@@ -238,7 +242,7 @@ fun HomeScreen(
         }
         status?.let { item { Text(it, color = MaterialTheme.colorScheme.primary) } }
         item { Text("Quick folders", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-        items(quick) { (name, dir) ->
+        items(quick, key = { it.second.absolutePath }) { (name, dir) ->
             ListItem(
                 headlineContent = { Text(name) },
                 supportingContent = { Text(dir.path) },

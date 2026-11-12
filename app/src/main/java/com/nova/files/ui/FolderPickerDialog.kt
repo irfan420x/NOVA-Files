@@ -8,6 +8,9 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.nova.files.data.FileRepo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -35,7 +38,9 @@ fun FolderPickerDialog(
             Column(Modifier.fillMaxWidth()) {
                 Text(dir.path, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(8.dp))
-                if (dir.parentFile != null && dir != FileRepo.internalRoot()) {
+                // v1.17: the parent of a removable-volume root is /storage,
+                // which lists nothing readable — don't offer to go there.
+                if (dir.parentFile != null && dir != FileRepo.internalRoot() && dir.parentFile.path != "/storage") {
                     TextButton(onClick = { dir = dir.parentFile!! }) { Text("↑ Parent folder") }
                 }
                 Column(Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState())) {
