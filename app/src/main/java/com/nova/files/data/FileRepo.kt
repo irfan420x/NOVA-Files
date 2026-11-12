@@ -202,12 +202,16 @@ object FileRepo {
     private fun volumeInfo(name: String, dir: File): StorageVolumeInfo? {
         return try {
             val st = StatFs(dir.path)
+            val rawTotal = st.blockCountLong * st.blockSizeLong
             val total = snapToNominal(
-                st.blockCountLong * st.blockSizeLong,
+                rawTotal,
                 longArrayOf(8, 16, 32, 64, 128, 256, 512, 1024, 2048)
             )
             val free = st.availableBlocksLong * st.blockSizeLong
-            StorageVolumeInfo(name, dir, total, free, (total - free).coerceAtLeast(0L))
+            // v1.16: "used" must be computed from the REAL total, not the
+            // snapped one — snapping 59 GB up to 64 GB while free stayed
+            // real overstated the used space by the snap gap.
+            StorageVolumeInfo(name, dir, total, free, (rawTotal - free).coerceAtLeast(0L))
         } catch (e: Exception) { null }
     }
 
@@ -238,6 +242,15 @@ object FileRepo {
                 SortMode.TYPE -> list.sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.extensionLower() }.thenBy { it.name.lowercase() })
             }
         }
+
+    /** Apply the user's sort to a category list (MediaStore order is always
+     *  date-desc, so the sort menu did nothing in category views). */
+    fun sortCategoryFiles(list: List<File>, sort: SortMode): List<File> = when (sort) {
+        SortMode.NAME -> list.sortedBy { it.name.lowercase() }
+        SortMode.SIZE -> list.sortedByDescending { if (it.isDirectory) 0L else it.length() }
+        SortMode.DATE -> list.sortedByDescending { it.lastModified() }
+        SortMode.TYPE -> list.sortedWith(compareBy<File> { it.extensionLower() }.thenBy { it.name.lowercase() })
+    }
 
     suspend fun categoryCounts(context: Context): CategoryCounts = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
@@ -437,12 +450,24 @@ object FileRepo {
             try {
                 destDir.mkdirs()
                 val destCanon = destDir.canonicalPath
+                var allOk = true
                 files.forEachIndexed { idx, src ->
                     // v1.15: never copy/move a folder into itself — that
                     // recursed forever and filled the storage with junk.
                     val srcCanon = src.canonicalPath
                     if (destCanon == srcCanon || destCanon.startsWith("$srcCanon${File.separator}")) {
-                        return@withContext false
+                        // v1.16: skip just this item instead of aborting the
+                        // whole batch — the other files are still valid.
+                        allOk = false
+                        onProgress(idx + 1, files.size)
+                        return@forEachIndexed
+                    }
+                    // v1.16: moving a file into the folder it already lives
+                    // in is a no-op — the old code renamed it to
+                    // "name (1).ext" and deleted the original.
+                    if (move && src.parentFile?.canonicalPath == destCanon) {
+                        onProgress(idx + 1, files.size)
+                        return@forEachIndexed
                     }
                     // v1.13: never silently overwrite — a same-named file in
                     // the destination gets "name (1).ext" instead of being
@@ -452,12 +477,12 @@ object FileRepo {
                     if (move) deleteRecursively(src)
                     onProgress(idx + 1, files.size)
                 }
-                true
+                allOk
             } catch (e: Exception) { false }
         }
 
     /** A destination name that does not overwrite an existing file. */
-    private fun nonCollidingDest(dir: File, name: String): File {
+    fun nonCollidingDest(dir: File, name: String): File {
         var dest = File(dir, name)
         if (!dest.exists()) return dest
         val base = name.substringBeforeLast('.', name)
@@ -520,15 +545,20 @@ object FileRepo {
         trashDir(context).listFiles()?.sortedByDescending { it.lastModified() } ?: emptyList()
     }
 
+    /** The original name of a trashed file, for display: strip the numeric
+     *  "<stamp>_<index>_" (v1.15) or "<stamp>_" (v1.14) prefix. */
+    fun trashDisplayName(trashName: String): String =
+        Regex("^\\d+_\\d+_(.*)$").find(trashName)?.groupValues?.get(1)
+            ?: Regex("^\\d+_(.*)$").find(trashName)?.groupValues?.get(1)
+            ?: trashName
+
     suspend fun restoreFromTrash(context: Context, file: File): Boolean = withContext(Dispatchers.IO) {
         try {
             // Trash file names are "<stamp>_<index>_<original name>" (v1.15)
             // or "<stamp>_<original name>" (v1.14 and older) — strip only
             // the numeric prefixes so an original name with underscores
             // (e.g. "my_file.jpg") survives intact.
-            val name = Regex("^\\d+_\\d+_(.*)$").find(file.name)?.groupValues?.get(1)
-                ?: Regex("^\\d+_(.*)$").find(file.name)?.groupValues?.get(1)
-                ?: file.name
+            val name = trashDisplayName(file.name)
             val parentPath = trashIndex(context).getString(file.name, null)
             val parent = parentPath?.takeIf { it.isNotBlank() }?.let { File(it) }
             // v1.15: restore never overwrites — a same-named file at the
@@ -557,13 +587,17 @@ object FileRepo {
         }
     }
 
-    suspend fun zipFiles(files: List<File>, zipFile: File): Boolean = withContext(Dispatchers.IO) {
+    /** Compress files to a ZIP. Returns the created file, or null on failure.
+     *  v1.16: the output never overwrites an existing ZIP — a same-named
+     *  one gets "name (1).zip" (the old code truncated it silently). */
+    suspend fun zipFiles(files: List<File>, zipFile: File): File? = withContext(Dispatchers.IO) {
         try {
-            ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+            val dest = nonCollidingDest(zipFile.parentFile ?: File("."), zipFile.name)
+            ZipOutputStream(FileOutputStream(dest)).use { zos ->
                 for (f in files) addToZip(f, "", zos)
             }
-            true
-        } catch (e: Exception) { false }
+            dest
+        } catch (e: Exception) { null }
     }
 
     private fun addToZip(f: File, base: String, zos: ZipOutputStream) {
@@ -630,9 +664,32 @@ object FileRepo {
                 "7z" -> extract7z(archive, destDir)
                 "rar" -> extractRar(archive, destDir)
                 "tar" -> extractTar(archive, destDir, gzipped = false)
-                "gz", "tgz" -> extractTar(archive, destDir, gzipped = true)
+                // v1.16: a plain .gz is a single compressed file, NOT a tar
+                // — feeding it to extractTar read 0 entries and reported
+                // success with an empty destination. Only .tar.gz/.tgz are
+                // gzipped tars; a plain .gz is gunzipped to one file.
+                "tgz" -> extractTar(archive, destDir, gzipped = true)
+                "gz" -> if (archive.nameWithoutExtension.endsWith(".tar", ignoreCase = true)) {
+                    extractTar(archive, destDir, gzipped = true)
+                } else {
+                    extractGz(archive, destDir)
+                }
                 else -> false
             }
+        } catch (e: Exception) { false }
+    }
+
+    /** Gunzip a plain .gz to a single file (the name minus the .gz). */
+    private fun extractGz(archive: File, destDir: File): Boolean {
+        return try {
+            destDir.mkdirs()
+            val outName = archive.name.removeSuffix(".gz").removeSuffix(".GZ")
+                .takeIf { it.isNotBlank() } ?: "file"
+            val out = File(destDir, outName)
+            java.util.zip.GZIPInputStream(archive.inputStream().buffered()).use { gz ->
+                out.outputStream().buffered().use { o -> gz.copyTo(o) }
+            }
+            out.exists() && out.length() > 0
         } catch (e: Exception) { false }
     }
 

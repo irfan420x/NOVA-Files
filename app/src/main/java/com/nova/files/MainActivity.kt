@@ -40,6 +40,33 @@ class MainActivity : FragmentActivity() {
     var permissionResult by mutableStateOf(0)
         private set
 
+    // v1.16: the Vault import picker, also classic. The Activity Result API
+    // (rememberLauncherForActivityResult + GetContent) crashed the app on
+    // every import for the same reason as the old permission crash —
+    // FragmentActivity rejects request codes >= 65536. A small code here
+    // keeps it working. The composable watches vaultImportUri.
+    var vaultImportUri by mutableStateOf<Uri?>(null)
+        private set
+
+    fun clearVaultImportUri() { vaultImportUri = null }
+
+    fun launchVaultImport() {
+        val intent = Intent(Intent.ACTION_GET_CONTENT).apply { type = "*/*" }
+        try {
+            startActivityForResult(intent, REQUEST_VAULT_IMPORT)
+        } catch (e: Exception) {
+            com.nova.files.data.ErrorLog.log(applicationContext, "Vault", "Couldn't open file picker", e)
+        }
+    }
+
+    @Deprecated("Classic picker for the Vault import (see above)")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_VAULT_IMPORT && resultCode == RESULT_OK) {
+            vaultImportUri = data?.data
+        }
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int, permissions: Array<String>, grantResults: IntArray
     ) {
@@ -49,6 +76,7 @@ class MainActivity : FragmentActivity() {
 
     companion object {
         const val REQUEST_STORAGE_PERMISSIONS = 1001
+        const val REQUEST_VAULT_IMPORT = 1002
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

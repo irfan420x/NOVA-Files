@@ -17,6 +17,9 @@
          QUERY_ALL_PACKAGES, Android 11+ filters getInstalledPackages() and
          many user apps are missing from the list. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <!-- v1.16: without this, tapping an APK can't install it and NOVA Files
+         never appears in Settings → "Install unknown apps". -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- v1.8: the Vault's fingerprint unlock needs these. The manual aapt2
          build does NOT merge AAR manifests, so the biometric AAR's own
          declarations never reached the app — without them, opening the Vault

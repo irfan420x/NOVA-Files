@@ -4,8 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -24,6 +23,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import com.nova.files.MainActivity
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
@@ -175,13 +175,17 @@ fun TrashScreen() {
     val scope = rememberCoroutineScope()
     var trash by remember { mutableStateOf<List<File>>(emptyList()) }
     var status by remember { mutableStateOf("") }
+    // v1.16: permanent deletes need a confirmation — "Empty all" and the
+    // per-item Delete used to wipe files on a single mis-tap, with no undo.
+    var emptyConfirm by remember { mutableStateOf(false) }
+    var deleteTarget by remember { mutableStateOf<File?>(null) }
 
     fun load() { scope.launch { FileRepo.purgeOldTrash(context); trash = FileRepo.listTrash(context) } }
     LaunchedEffect(Unit) { load() }
 
     Scaffold(
         topBar = { TopAppBar(title = { Text("Trash") }, actions = {
-            TextButton(onClick = { scope.launch { FileRepo.emptyTrash(context); status = "Trash emptied"; load() } }) { Text("Empty all") }
+            TextButton(onClick = { emptyConfirm = true }) { Text("Empty all") }
         }) }
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
@@ -194,13 +198,23 @@ fun TrashScreen() {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(trash) { f ->
                         ListItem(
-                            headlineContent = { Text(f.name.substringAfter('_', f.name)) },
+                            // v1.16: trash names are <stamp>_<index>_<name>
+                            // (v1.15) or <stamp>_<name> (v1.14) — strip both
+                            // prefixes, or every item showed "0_photo.jpg".
+                            headlineContent = { Text(FileRepo.trashDisplayName(f.name)) },
                             supportingContent = { Text(if (f.isDirectory) "Folder" else formatSize(f.length())) },
                             leadingContent = { Icon(Icons.Filled.Delete, null) },
                             trailingContent = {
                                 Row {
-                                    TextButton(onClick = { scope.launch { FileRepo.restoreFromTrash(context, f); status = "Restored"; load() } }) { Text("Restore") }
-                                    TextButton(onClick = { scope.launch { withContext(Dispatchers.IO) { FileRepo.deleteFromTrash(context, f) }; load() } }) { Text("Delete") }
+                                    // v1.16: report the real result — the old
+                                    // code always said "Restored" even when
+                                    // the copy failed and the file stayed here.
+                                    TextButton(onClick = { scope.launch {
+                                        val ok = FileRepo.restoreFromTrash(context, f)
+                                        status = if (ok) "Restored" else "Couldn't restore — the original location may be unavailable"
+                                        load()
+                                    } }) { Text("Restore") }
+                                    TextButton(onClick = { deleteTarget = f }) { Text("Delete") }
                                 }
                             }
                         )
@@ -208,6 +222,32 @@ fun TrashScreen() {
                 }
             }
         }
+    }
+
+    if (emptyConfirm) {
+        AlertDialog(
+            onDismissRequest = { emptyConfirm = false },
+            title = { Text("Empty the Trash?") },
+            text = { Text("This permanently deletes everything in the Trash (${trash.size} items). This cannot be undone.") },
+            confirmButton = { TextButton(onClick = {
+                scope.launch { FileRepo.emptyTrash(context); status = "Trash emptied"; load() }
+                emptyConfirm = false
+            }) { Text("Empty Trash") } },
+            dismissButton = { TextButton(onClick = { emptyConfirm = false }) { Text("Cancel") } }
+        )
+    }
+    if (deleteTarget != null) {
+        val target = deleteTarget!!
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("Delete permanently?") },
+            text = { Text("“${FileRepo.trashDisplayName(target.name)}” will be permanently deleted. This cannot be undone.") },
+            confirmButton = { TextButton(onClick = {
+                scope.launch { withContext(Dispatchers.IO) { FileRepo.deleteFromTrash(context, target) }; load() }
+                deleteTarget = null
+            }) { Text("Delete") } },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } }
+        )
     }
 }
 
@@ -231,18 +271,49 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
     // v1.10: the Remove PIN dialog state.
     var showRemovePin by remember { mutableStateOf(false) }
 
-    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
+    // v1.16: the import picker is the classic startActivityForResult flow
+    // on MainActivity — the Activity Result API crashed the app on every
+    // import (FragmentActivity rejects its >= 65536 request codes).
+    val mainActivity = LocalContext.current as? MainActivity
+    LaunchedEffect(mainActivity?.vaultImportUri) {
+        val uri = mainActivity?.vaultImportUri ?: return@LaunchedEffect
+        mainActivity.clearVaultImportUri()
         scope.launch {
-            withContext(Dispatchers.IO) {
+            val result = withContext(Dispatchers.IO) {
                 try {
-                    val name = uri.lastPathSegment?.substringAfterLast('/') ?: "file_${System.currentTimeMillis()}"
-                    val dest = File(FileRepo.vaultDir(context), name)
+                    // Real filename, not the SAF document id (lastPathSegment
+                    // gives "msf:123" for content URIs).
+                    var name = "file_${System.currentTimeMillis()}"
+                    try {
+                        context.contentResolver.query(
+                            uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                            null, null, null
+                        )?.use { c ->
+                            if (c.moveToFirst()) {
+                                c.getString(0)?.takeIf { it.isNotBlank() }?.let { name = it }
+                            }
+                        }
+                    } catch (_: Exception) { }
+                    val dest = FileRepo.nonCollidingDest(FileRepo.vaultDir(context), name)
                     context.contentResolver.openInputStream(uri)?.use { ins ->
                         dest.outputStream().use { out -> ins.copyTo(out) }
-                    }
-                } catch (e: Exception) { }
+                    } ?: return@withContext "Import failed — couldn't read the file"
+                    // Import is a MOVE: the original must not stay visible
+                    // to every other app (v1.15 copied and left it behind).
+                    val deleted = try {
+                        if (uri.scheme == "file") {
+                            java.io.File(uri.path ?: "").delete()
+                        } else {
+                            android.provider.DocumentsContract.deleteDocument(context.contentResolver, uri)
+                        }
+                    } catch (_: Exception) { false }
+                    if (deleted) "Imported to Vault" else "Imported — delete the original yourself, it is still visible to other apps"
+                } catch (e: Exception) {
+                    ErrorLog.log(context, "Vault", "Import failed", e)
+                    "Import failed: ${e.message ?: e.javaClass.simpleName}"
+                }
             }
+            status = result
             files = withContext(Dispatchers.IO) { FileRepo.vaultDir(context).listFiles()?.toList() ?: emptyList() }
         }
     }
@@ -381,7 +452,7 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
         topBar = { TopAppBar(title = { Text("Vault") }, actions = {
             TextButton(onClick = { showChangePin = true }) { Text("Change PIN") }
             TextButton(onClick = { showRemovePin = true }) { Text("Remove PIN") }
-            TextButton(onClick = { importLauncher.launch("*/*") }) { Text("Import") }
+            TextButton(onClick = { mainActivity?.launchVaultImport() }) { Text("Import") }
         }) }
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
@@ -556,7 +627,15 @@ fun ViewerScreen(
         scale = 1f; offset = Offset.Zero
         if (file.extensionLower() == "txt") {
             text = withContext(Dispatchers.IO) {
-                try { file.readText().take(200_000) } catch (e: Exception) { "Could not read file." }
+                // v1.16: stream only the first 200 KB — readText() loaded
+                // the whole file first, so a 200 MB log OOM'd the app.
+                try {
+                    file.inputStream().bufferedReader().use { r ->
+                        val buf = CharArray(200_000)
+                        val read = r.read(buf)
+                        if (read < 0) "" else String(buf, 0, read)
+                    }
+                } catch (e: Exception) { "Could not read file." }
             }
         } else text = null
     }

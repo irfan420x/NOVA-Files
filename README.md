@@ -115,3 +115,4 @@ Minimum SDK 29 (Android 10), target SDK 35.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+

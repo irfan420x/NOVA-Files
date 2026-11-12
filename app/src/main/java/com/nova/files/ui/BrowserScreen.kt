@@ -77,7 +77,11 @@ fun BrowserScreen(
             files = when {
                 category != null -> {
                     val all = FileRepo.listCategoryFiles(context, category)
-                    if (q.isEmpty()) all else all.filter { it.name.contains(q, ignoreCase = true) }
+                    // v1.16: apply the user's sort — category lists used to
+                    // ignore it (always date-desc) while the sort menu was
+                    // still shown.
+                    val sorted = FileRepo.sortCategoryFiles(all, sort)
+                    if (q.isEmpty()) sorted else sorted.filter { it.name.contains(q, ignoreCase = true) }
                 }
                 q.isNotEmpty() -> {
                     status = "Searching…"
@@ -136,10 +140,10 @@ fun BrowserScreen(
                             scope.launch {
                                 progress = "Compressing…"
                                 val dest = File(items.first().parentFile ?: dir, "${items.first().nameWithoutExtension}.zip")
-                                val ok = FileRepo.zipFiles(items, dest)
+                                val created = FileRepo.zipFiles(items, dest)
                                 progress = null; selected = emptySet()
-                                status = if (ok) "Saved ${dest.name}" else "Compress failed"
-                                if (!ok) ErrorLog.log(context, "Compress", "Failed to compress ${items.size} item(s)")
+                                status = if (created != null) "Saved ${created.name}" else "Compress failed"
+                                if (created == null) ErrorLog.log(context, "Compress", "Failed to compress ${items.size} item(s)")
                                 load()
                             }
                         }) { Icon(Icons.Filled.Archive, "Compress") }
@@ -285,10 +289,10 @@ fun BrowserScreen(
                         scope.launch {
                             progress = "Compressing…"
                             val dest = File(f.parentFile, "${f.nameWithoutExtension}.zip")
-                            val ok = FileRepo.zipFiles(listOf(f), dest)
+                            val created = FileRepo.zipFiles(listOf(f), dest)
                             progress = null
-                            status = if (ok) "Saved ${dest.name}" else "Compress failed"
-                            if (!ok) ErrorLog.log(context, "Compress", "Failed to compress ${f.name}")
+                            status = if (created != null) "Saved ${created.name}" else "Compress failed"
+                            if (created == null) ErrorLog.log(context, "Compress", "Failed to compress ${f.name}")
                             load()
                         }
                     }
@@ -394,11 +398,18 @@ fun BrowserScreen(
                     val trimmed = name.trim()
                     when {
                         trimmed.isEmpty() -> renameError = "Name cannot be empty"
+                        // v1.16: "/" is a path separator, not a filename —
+                        // the old code let it through and the rename
+                        // silently failed.
+                        '/' in trimmed -> renameError = "Name cannot contain “/”"
                         trimmed != target.name && target.parentFile?.let { File(it, trimmed).exists() } == true ->
                             renameError = "A file with this name already exists"
                         else -> scope.launch {
-                            withContext(Dispatchers.IO) { target.renameTo(File(target.parentFile, trimmed)) }
-                            renameTarget = null; load()
+                            // v1.16: check the result — a failed rename used
+                            // to close the dialog and reload as if it worked.
+                            val ok = withContext(Dispatchers.IO) { target.renameTo(File(target.parentFile, trimmed)) }
+                            if (ok) { renameTarget = null; load() }
+                            else renameError = "Couldn't rename — the file may be in use or read-only"
                         }
                     }
                 }) { Text("Rename") }

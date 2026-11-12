@@ -136,7 +136,7 @@ fun AppManagerScreen(onBack: () -> Unit) {
                                                     AppRepo.backupApk(context, app)
                                                 }
                                                 backingUp = null
-                                                if (file != null) onStatus("APK saved to Downloads/NOVA/Apps/${file.name}")
+                                                if (file != null) onStatus("APK saved to Downloads/NOVA/Apps/${file.parentFile?.name}/${file.name}")
                                                 else onStatus("Couldn't back up ${app.label}")
                                             }
                                         },
