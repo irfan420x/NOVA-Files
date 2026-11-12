@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Build
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -132,17 +134,24 @@ fun HomeScreen(
             }
         }
         item {
-            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            // v1.18: Nebula card — surface, 20dp radius, 1dp outline border.
+            Card(
+                Modifier.fillMaxWidth(),
+                shape = NovaCardShape,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
                 Column(Modifier.padding(16.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text("Internal storage", fontWeight = FontWeight.Bold)
-                        Text("$usedPct% used", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("$usedPct% used", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium)
                     }
                     Spacer(Modifier.height(12.dp))
                     LinearProgressIndicator(
                         progress = { usedPct / 100f },
                         modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)),
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
                     )
                     Spacer(Modifier.height(8.dp))
                     Text("${formatSizeDecimal(stats.usedBytes)} used  •  ${formatSizeDecimal(stats.freeBytes)} free")
@@ -161,7 +170,10 @@ fun HomeScreen(
                     }
                     if (refreshing) {
                         Spacer(Modifier.height(8.dp))
-                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                        LinearProgressIndicator(
+                            Modifier.fillMaxWidth(),
+                            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                        )
                     }
                 }
             }
@@ -171,7 +183,9 @@ fun HomeScreen(
             val volPct = if (vol.totalBytes > 0) (vol.usedBytes * 100 / vol.totalBytes).toInt() else 0
             Card(
                 Modifier.fillMaxWidth().clickable { onOpenDir(vol.dir) },
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                shape = NovaCardShape,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
             ) {
                 Column(Modifier.padding(16.dp)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -180,13 +194,14 @@ fun HomeScreen(
                             Spacer(Modifier.width(8.dp))
                             Text(vol.name, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
-                        Text("$volPct% used", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("$volPct% used", color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.Medium)
                     }
                     Spacer(Modifier.height(12.dp))
                     LinearProgressIndicator(
                         progress = { volPct / 100f },
                         modifier = Modifier.fillMaxWidth().height(10.dp).clip(RoundedCornerShape(5.dp)),
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
                     )
                     Spacer(Modifier.height(8.dp))
                     Text("${formatSizeDecimal(vol.usedBytes)} used  •  ${formatSizeDecimal(vol.freeBytes)} free")
@@ -204,13 +219,29 @@ fun HomeScreen(
                 row.forEach { cat ->
                     Card(
                         Modifier.weight(1f).clickable { onOpenCategory(cat.id) },
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        shape = NovaCardShape,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                     ) {
                         Column(Modifier.padding(16.dp)) {
-                            Icon(cat.icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+                            // v1.18: icon in a soft violet chip.
+                            Box(
+                                Modifier.size(48.dp)
+                                    .background(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                                        RoundedCornerShape(14.dp)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(cat.icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+                            }
                             Spacer(Modifier.height(8.dp))
                             Text(cat.title, fontWeight = FontWeight.Bold)
-                            Text("${cat.count} items", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                "${cat.count} items",
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontWeight = FontWeight.Medium
+                            )
                         }
                     }
                 }
@@ -219,7 +250,7 @@ fun HomeScreen(
         }
         item { Text("Recent files", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
         if (recents.isEmpty()) {
-            item { Text("No recent files", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { NebulaEmptyState(Icons.Filled.History, "No recent files") }
         }
         items(recents.take(10), key = { it.absolutePath }) { f ->
             ListItem(
@@ -233,7 +264,8 @@ fun HomeScreen(
                     }
                 },
                 modifier = Modifier.clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, NovaRowShape)
                     .clickable {
                         if (isImage(f) || f.extensionLower() == "txt") onOpenFile(f, recents)
                         else if (!FileRepo.openWithIntent(context, f)) status = "No app can open this file"
@@ -248,7 +280,8 @@ fun HomeScreen(
                 supportingContent = { Text(dir.path) },
                 leadingContent = { Icon(Icons.Filled.Folder, null, tint = MaterialTheme.colorScheme.primary) },
                 modifier = Modifier.clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, NovaRowShape)
                     .clickable { onOpenDir(dir) }
             )
         }
@@ -260,7 +293,8 @@ fun HomeScreen(
                 supportingContent = { Text("Installed apps — back up APKs, uninstall, open") },
                 leadingContent = { Icon(Icons.Filled.Apps, null, tint = MaterialTheme.colorScheme.primary) },
                 modifier = Modifier.clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, NovaRowShape)
                     .clickable { onOpenApps() }
             )
         }
@@ -274,7 +308,8 @@ fun HomeScreen(
                 },
                 leadingContent = { Icon(Icons.Filled.BugReport, null, tint = MaterialTheme.colorScheme.primary) },
                 modifier = Modifier.clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, NovaRowShape)
                     .clickable { onOpenErrorLog() }
             )
         }

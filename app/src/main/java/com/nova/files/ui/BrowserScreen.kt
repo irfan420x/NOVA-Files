@@ -3,8 +3,10 @@ package com.nova.files.ui
 
 import android.content.Intent
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.rememberScrollState
@@ -23,6 +25,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -145,6 +148,9 @@ fun BrowserScreen(
     Scaffold(
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
                 title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 navigationIcon = {
                     if (category == null && dir.parentFile != null && dir != FileRepo.internalRoot() && dir.parentFile.path != "/storage") {
@@ -213,7 +219,12 @@ fun BrowserScreen(
                         }
                     },
                     icon = { Icon(Icons.Filled.ContentPaste, null) },
-                    text = { Text(if (clipboard!!.second) "Move here" else "Paste here") }
+                    text = { Text(if (clipboard!!.second) "Move here" else "Paste here") },
+                    // v1.18: Nebula gradient FAB, white icon, 16dp radius.
+                    containerColor = Color.Transparent,
+                    contentColor = Color.White,
+                    shape = NovaFabShape,
+                    modifier = Modifier.nebulaGradient(NovaFabShape)
                 )
             }
         }
@@ -224,6 +235,7 @@ fun BrowserScreen(
                     value = query, onValueChange = { query = it },
                     placeholder = { Text("Search files…") },
                     singleLine = true,
+                    shape = NovaButtonShape,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                     trailingIcon = {
                         IconButton(onClick = { load() }) { Icon(Icons.Filled.Search, "Search") }
@@ -240,18 +252,22 @@ fun BrowserScreen(
             status?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), color = MaterialTheme.colorScheme.primary) }
             progress?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) }
             if (loading) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-            } else if (files.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No files here", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    CircularProgressIndicator(trackColor = MaterialTheme.colorScheme.surfaceContainerHighest)
                 }
+            } else if (files.isEmpty()) {
+                NebulaEmptyState(Icons.Filled.Folder, "No files here")
             } else if (grid) {
                 LazyVerticalGrid(columns = GridCells.Fixed(3), Modifier.fillMaxSize().padding(8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(files, key = { it.absolutePath }) { f -> FileGridItem(f, f in selected, folderCounts[f], onClick = { onFileTap(f, files, selected, { selected = it }, onNavigate, onOpenFile, context, onError = { status = it }) }, onLongClick = { contextFile = f }) }
                 }
             } else {
-                LazyColumn(Modifier.fillMaxSize()) {
+                LazyColumn(
+                    Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     items(files, key = { it.absolutePath }) { f ->
                         FileRow(f, f in selected, dateFmt, folderCounts[f],
                             onClick = { onFileTap(f, files, selected, { selected = it }, onNavigate, onOpenFile, context, onError = { status = it }) },
@@ -266,7 +282,10 @@ fun BrowserScreen(
     // Long-press context menu: Open / Share / Copy / Move / Rename / Compress /
     // Extract (zip only) / Delete / Details / Select
     contextFile?.let { f ->
-        ModalBottomSheet(onDismissRequest = { contextFile = null }) {
+        ModalBottomSheet(
+            onDismissRequest = { contextFile = null },
+            containerColor = MaterialTheme.colorScheme.surface
+        ) {
             Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp).padding(bottom = 24.dp)) {
                 Text(f.name, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(f.path, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -441,7 +460,7 @@ fun BrowserScreen(
             title = { Text("Rename") },
             text = {
                 Column {
-                    OutlinedTextField(value = name, onValueChange = { name = it; renameError = null }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = name, onValueChange = { name = it; renameError = null }, singleLine = true, shape = NovaButtonShape, modifier = Modifier.fillMaxWidth())
                     renameError?.let { Spacer(Modifier.height(8.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
                 }
             },
@@ -479,7 +498,7 @@ fun BrowserScreen(
             title = { Text("New folder") },
             text = {
                 Column {
-                    OutlinedTextField(value = name, onValueChange = { name = it; folderError = null }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = name, onValueChange = { name = it; folderError = null }, singleLine = true, shape = NovaButtonShape, modifier = Modifier.fillMaxWidth())
                     folderError?.let { Spacer(Modifier.height(8.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
                 }
             },
@@ -560,7 +579,17 @@ fun FileRow(f: File, isSelected: Boolean, dateFmt: SimpleDateFormat, childCount:
             IconButton(onClick = onMenu) { Icon(Icons.Filled.MoreVert, "More options") }
         },
         modifier = Modifier
-            .background(if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f) else MaterialTheme.colorScheme.background)
+            .clip(NovaRowShape)
+            .background(
+                if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                else MaterialTheme.colorScheme.surface
+            )
+            .border(
+                1.dp,
+                if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                else MaterialTheme.colorScheme.outline,
+                NovaRowShape
+            )
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
     )
 }
@@ -569,8 +598,14 @@ fun FileRow(f: File, isSelected: Boolean, dateFmt: SimpleDateFormat, childCount:
 fun FileGridItem(f: File, isSelected: Boolean, childCount: Int? = null, onClick: () -> Unit, onLongClick: () -> Unit) {
     Card(
         Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
+        shape = NovaCardShape,
+        border = BorderStroke(
+            1.dp,
+            if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+            else MaterialTheme.colorScheme.outline
+        ),
         colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surfaceVariant
+            containerColor = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else MaterialTheme.colorScheme.surface
         )
     ) {
         Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {

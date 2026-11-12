@@ -10,13 +10,16 @@ import android.os.Environment
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
@@ -239,6 +242,15 @@ private fun NovaAppContent(
         return
     }
 
+    // v1.18: Nebula nav — violet gradient pill behind the selected tab.
+    val navColors = NavigationBarItemDefaults.colors(
+        selectedIconColor = Color.White,
+        selectedTextColor = NebulaPrimary,
+        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        indicatorColor = NebulaPrimary
+    )
+
     Scaffold(
         bottomBar = {
             NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
@@ -246,31 +258,36 @@ private fun NovaAppContent(
                     selected = screen == Screen.HOME,
                     onClick = { onScreenChange(Screen.HOME) },
                     icon = { Icon(Icons.Filled.Home, null) },
-                    label = { Text("Home") }
+                    label = { Text("Home") },
+                    colors = navColors
                 )
                 NavigationBarItem(
                     selected = screen == Screen.BROWSER,
                     onClick = { onScreenChange(Screen.BROWSER); onBrowseCategory(null) },
                     icon = { Icon(Icons.Filled.Folder, null) },
-                    label = { Text("Files") }
+                    label = { Text("Files") },
+                    colors = navColors
                 )
                 NavigationBarItem(
                     selected = screen == Screen.ANALYZER,
                     onClick = { onScreenChange(Screen.ANALYZER) },
                     icon = { Icon(Icons.Filled.Assessment, null) },
-                    label = { Text("Storage") }
+                    label = { Text("Storage") },
+                    colors = navColors
                 )
                 NavigationBarItem(
                     selected = screen == Screen.TRASH,
                     onClick = { onScreenChange(Screen.TRASH) },
                     icon = { Icon(Icons.Filled.Delete, null) },
-                    label = { Text("Trash") }
+                    label = { Text("Trash") },
+                    colors = navColors
                 )
                 NavigationBarItem(
                     selected = screen == Screen.VAULT,
                     onClick = { onScreenChange(Screen.VAULT) },
                     icon = { Icon(Icons.Filled.Lock, null) },
-                    label = { Text("Vault") }
+                    label = { Text("Vault") },
+                    colors = navColors
                 )
             }
         }
@@ -337,7 +354,13 @@ fun PermissionScreen(onGrant: () -> Unit, onRecheck: () -> Unit) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Icon(Icons.Filled.Folder, null, Modifier.size(72.dp), tint = MaterialTheme.colorScheme.primary)
+        // v1.18: Nebula hero — folder icon in a gradient circle.
+        Box(
+            Modifier.size(88.dp).background(NebulaGradientBrush, CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Filled.Folder, null, Modifier.size(40.dp), tint = Color.White)
+        }
         Spacer(Modifier.height(16.dp))
         Text("NOVA Files", style = MaterialTheme.typography.headlineMedium)
         Spacer(Modifier.height(8.dp))
@@ -347,8 +370,15 @@ fun PermissionScreen(onGrant: () -> Unit, onRecheck: () -> Unit) {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Spacer(Modifier.height(24.dp))
-        Button(onClick = onGrant, Modifier.fillMaxWidth()) { Text("Allow file access") }
+        Button(
+            onClick = onGrant,
+            modifier = Modifier.fillMaxWidth().nebulaGradient(NovaButtonShape),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color.Transparent, contentColor = Color.White
+            ),
+            shape = NovaButtonShape
+        ) { Text("Allow file access") }
         Spacer(Modifier.height(12.dp))
-        OutlinedButton(onClick = onRecheck, Modifier.fillMaxWidth()) { Text("I already allowed it") }
+        OutlinedButton(onClick = onRecheck, Modifier.fillMaxWidth(), shape = NovaButtonShape) { Text("I already allowed it") }
     }
 }

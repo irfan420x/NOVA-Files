@@ -5,6 +5,9 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -13,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -20,7 +24,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -104,7 +110,10 @@ fun AnalyzerScreen(
                 headlineContent = { Text(dir.name) },
                 supportingContent = { Text(size?.let { formatSize(it) } ?: "calculating…") },
                 leadingContent = { Icon(Icons.Filled.Folder, null, tint = MaterialTheme.colorScheme.primary) },
-                modifier = Modifier.clickable { onOpenDir(dir) }
+                modifier = Modifier.clip(NovaRowShape)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, NovaRowShape)
+                    .clickable { onOpenDir(dir) }
             )
         }
         item { Text("Large files (over 50 MB)", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
@@ -113,13 +122,17 @@ fun AnalyzerScreen(
                 headlineContent = { Text(f.name) },
                 supportingContent = { Text("${formatSize(f.length())} • ${f.parentFile?.name}") },
                 leadingContent = { Icon(fileIcon(f), null, tint = MaterialTheme.colorScheme.primary) },
-                modifier = Modifier.clickable {
-                    if (isImage(f) || f.extensionLower() == "txt") onOpenFile(f, large)
-                    else if (!FileRepo.openWithIntent(context, f)) status = "No app can open this file"
-                }
+                modifier = Modifier.clip(NovaRowShape)
+                    .background(MaterialTheme.colorScheme.surface)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, NovaRowShape)
+                    .clickable {
+                        if (isImage(f) || f.extensionLower() == "txt") onOpenFile(f, large)
+                        else if (!FileRepo.openWithIntent(context, f)) status = "No app can open this file"
+                    }
             )
         }
         item {
+            // v1.18: Nebula gradient primary button.
             Button(
                 onClick = {
                     if (dupScanning) { scanJob?.cancel(); return@Button }
@@ -134,18 +147,32 @@ fun AnalyzerScreen(
                         dupScanning = false
                     }
                 },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth().nebulaGradient(NovaButtonShape),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.Transparent, contentColor = Color.White
+                ),
+                shape = NovaButtonShape
             ) { Text(if (dupScanning) "Stop scan" else "Find duplicate files") }
             if (scanStatus.isNotBlank()) { Spacer(Modifier.height(8.dp)); Text(scanStatus) }
         }
         items(dups, key = { it.files.firstOrNull()?.absolutePath ?: it.hashCode().toString() }) { group ->
-            Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Card(
+                Modifier.fillMaxWidth(),
+                shape = NovaCardShape,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
                 Column(Modifier.padding(12.dp)) {
                     Text("${group.files.size} copies • ${formatSize(group.size)} each", fontWeight = FontWeight.Bold)
                     group.files.forEach { f ->
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(f.name, modifier = Modifier.weight(1f))
-                            TextButton(onClick = { dupDeleteTarget = f }) { Text("Delete") }
+                            TextButton(
+                                onClick = { dupDeleteTarget = f },
+                                colors = ButtonDefaults.textButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.error
+                                )
+                            ) { Text("Delete") }
                         }
                     }
                 }
@@ -199,16 +226,30 @@ fun TrashScreen() {
     LaunchedEffect(Unit) { load() }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Trash") }, actions = {
-            TextButton(onClick = { emptyConfirm = true }, enabled = trash.isNotEmpty()) { Text("Empty all") }
-        }) }
+        topBar = {
+            TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                title = { Text("Trash") },
+                actions = {
+                    TextButton(
+                        onClick = { emptyConfirm = true },
+                        enabled = trash.isNotEmpty(),
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) { Text("Empty all") }
+                }
+            )
+        }
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
             Text("Deleted files stay here for 30 days, then are removed. Restore any time.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (status.isNotBlank()) { Spacer(Modifier.height(8.dp)); Text(status, color = MaterialTheme.colorScheme.primary) }
             Spacer(Modifier.height(12.dp))
             if (trash.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Trash is empty") }
+                NebulaEmptyState(Icons.Filled.Delete, "Trash is empty")
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(trash, key = { it.absolutePath }) { f ->
@@ -229,9 +270,17 @@ fun TrashScreen() {
                                         status = if (ok) "Restored" else "Couldn't restore — the original location may be unavailable"
                                         load()
                                     } }) { Text("Restore") }
-                                    TextButton(onClick = { deleteTarget = f }) { Text("Delete") }
+                                    TextButton(
+                                        onClick = { deleteTarget = f },
+                                        colors = ButtonDefaults.textButtonColors(
+                                            contentColor = MaterialTheme.colorScheme.error
+                                        )
+                                    ) { Text("Delete") }
                                 }
-                            }
+                            },
+                            modifier = Modifier.clip(NovaRowShape)
+                                .background(MaterialTheme.colorScheme.surface)
+                                .border(1.dp, MaterialTheme.colorScheme.outline, NovaRowShape)
                         )
                     }
                 }
@@ -413,7 +462,13 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
 
     if (!unlocked) {
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(Icons.Filled.Lock, null, Modifier.size(64.dp), tint = MaterialTheme.colorScheme.primary)
+            // v1.18: Nebula hero — lock icon in a gradient circle.
+            Box(
+                Modifier.size(88.dp).background(NebulaGradientBrush, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Filled.Lock, null, Modifier.size(40.dp), tint = Color.White)
+            }
             Spacer(Modifier.height(16.dp))
             Text(if (setupMode) "Set a vault PIN" else "Enter vault PIN", style = MaterialTheme.typography.titleLarge)
             if (setupMode) {
@@ -429,6 +484,7 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                 value = pin, onValueChange = { pin = it.filter { c -> c.isDigit() }.take(6) },
                 label = { Text("PIN (4–6 digits)") },
                 singleLine = true,
+                shape = NovaButtonShape,
                 visualTransformation = PasswordVisualTransformation()
             )
             if (setupMode) {
@@ -437,6 +493,7 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                     value = confirmPin, onValueChange = { confirmPin = it.filter { c -> c.isDigit() }.take(6) },
                     label = { Text("Confirm PIN") },
                     singleLine = true,
+                    shape = NovaButtonShape,
                     visualTransformation = PasswordVisualTransformation()
                 )
             }
@@ -453,13 +510,18 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                         unlocked = true; pin = ""; load()
                     } else error = "Wrong PIN"
                 },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth().nebulaGradient(NovaButtonShape),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color.Transparent, contentColor = Color.White
+                ),
+                shape = NovaButtonShape
             ) { Text(if (setupMode) "Create vault" else "Unlock") }
             if (!setupMode && biometricAvailable && activity != null) {
                 Spacer(Modifier.height(12.dp))
                 OutlinedButton(
                     onClick = { launchFingerprint { unlocked = true; pin = ""; load() } },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = NovaButtonShape
                 ) { Text("Unlock with fingerprint") }
             }
             if (!setupMode) {
@@ -480,18 +542,31 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
     }
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Vault") }, actions = {
-            TextButton(onClick = { showChangePin = true }) { Text("Change PIN") }
-            TextButton(onClick = { showRemovePin = true }) { Text("Remove PIN") }
-            TextButton(onClick = { mainActivity?.launchVaultImport() }) { Text("Import") }
-        }) }
+        topBar = {
+            TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                title = { Text("Vault") },
+                actions = {
+                    TextButton(onClick = { showChangePin = true }) { Text("Change PIN") }
+                    TextButton(
+                        onClick = { showRemovePin = true },
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) { Text("Remove PIN") }
+                    TextButton(onClick = { mainActivity?.launchVaultImport() }) { Text("Import") }
+                }
+            )
+        }
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
             Text("Files in the vault are stored in private app storage — other apps cannot see them.", color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (status.isNotBlank()) { Spacer(Modifier.height(8.dp)); Text(status, color = MaterialTheme.colorScheme.primary) }
             Spacer(Modifier.height(12.dp))
             if (files.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Vault is empty. Tap Import to add files.") }
+                NebulaEmptyState(Icons.Filled.Lock, "Vault is empty. Tap Import to add files.")
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(files, key = { it.absolutePath }) { f ->
@@ -502,7 +577,12 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                             trailingContent = {
                                 Row {
                                     TextButton(onClick = { moveOutTarget = f }) { Text("Move out") }
-                                    TextButton(onClick = { deleteTarget = f }) { Text("Delete") }
+                                    TextButton(
+                                        onClick = { deleteTarget = f },
+                                        colors = ButtonDefaults.textButtonColors(
+                                            contentColor = MaterialTheme.colorScheme.error
+                                        )
+                                    ) { Text("Delete") }
                                 }
                             },
                             // v1.17: only images and text open inside the
@@ -510,10 +590,13 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                             // every other type. Other types must be moved
                             // out first (opening them in another app would
                             // hand a private vault file to that app).
-                            modifier = Modifier.clickable {
-                                if (isImage(f) || f.extensionLower() == "txt") onOpenFile(f)
-                                else status = "Only images and text open inside the Vault — move it out to open it elsewhere"
-                            }
+                            modifier = Modifier.clip(NovaRowShape)
+                                .background(MaterialTheme.colorScheme.surface)
+                                .border(1.dp, MaterialTheme.colorScheme.outline, NovaRowShape)
+                                .clickable {
+                                    if (isImage(f) || f.extensionLower() == "txt") onOpenFile(f)
+                                    else status = "Only images and text open inside the Vault — move it out to open it elsewhere"
+                                }
                         )
                     }
                 }
@@ -573,18 +656,21 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                     OutlinedTextField(
                         value = currentPin, onValueChange = { currentPin = it.filter { c -> c.isDigit() }.take(6); changeError = null },
                         label = { Text("Current PIN") }, singleLine = true,
+                        shape = NovaButtonShape,
                         visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = newPin, onValueChange = { newPin = it.filter { c -> c.isDigit() }.take(6); changeError = null },
                         label = { Text("New PIN (4–6 digits)") }, singleLine = true,
+                        shape = NovaButtonShape,
                         visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = confirmNewPin, onValueChange = { confirmNewPin = it.filter { c -> c.isDigit() }.take(6); changeError = null },
                         label = { Text("Confirm new PIN") }, singleLine = true,
+                        shape = NovaButtonShape,
                         visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
                     )
                     changeError?.let { Spacer(Modifier.height(8.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
@@ -624,6 +710,7 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                     OutlinedTextField(
                         value = currentPin, onValueChange = { currentPin = it.filter { c -> c.isDigit() }.take(6); removeError = null },
                         label = { Text("Current PIN") }, singleLine = true,
+                        shape = NovaButtonShape,
                         visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth()
                     )
                     removeError?.let { Spacer(Modifier.height(8.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
@@ -695,6 +782,9 @@ fun ViewerScreen(
     }
     Scaffold(topBar = {
         TopAppBar(
+            colors = TopAppBarDefaults.topAppBarColors(
+                containerColor = MaterialTheme.colorScheme.surface
+            ),
             title = { Text(file.name) },
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Filled.ArrowBack, "Back") } },
             actions = {
@@ -724,7 +814,7 @@ fun ViewerScreen(
                         .graphicsLayer(scaleX = scale, scaleY = scale, translationX = offset.x, translationY = offset.y)
                 )
                 text != null -> Text(text!!, modifier = Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()))
-                else -> Text("Preview not available for this file type", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                else -> NebulaEmptyState(Icons.Filled.InsertDriveFile, "Preview not available for this file type")
             }
             // v1.17: the viewer never showed its status text (e.g. a failed
             // share), so failures were invisible.
@@ -748,6 +838,9 @@ fun ErrorLogScreen(onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
                 title = { Text("Error log") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Filled.ArrowBack, "Back") } },
                 actions = {
@@ -762,11 +855,16 @@ fun ErrorLogScreen(onBack: () -> Unit) {
                         // still said "Copied".
                         enabled = entries.isNotEmpty()
                     ) { Text("Copy") }
-                    TextButton(onClick = {
-                        ErrorLog.clear(context)
-                        entries = emptyList()
-                        status = "Log cleared"
-                    }) { Text("Clear") }
+                    TextButton(
+                        onClick = {
+                            ErrorLog.clear(context)
+                            entries = emptyList()
+                            status = "Log cleared"
+                        },
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) { Text("Clear") }
                 }
             )
         }
@@ -782,13 +880,18 @@ fun ErrorLogScreen(onBack: () -> Unit) {
             }
             Spacer(Modifier.height(12.dp))
             if (entries.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("No errors recorded.") }
+                NebulaEmptyState(Icons.Filled.CheckCircle, "No errors recorded.")
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     // Index keys: two entries can have identical text (same
                     // second, same message), and duplicate keys crash the list.
                     itemsIndexed(entries, key = { index, _ -> index }) { _, e ->
-                        Card(Modifier.fillMaxWidth()) {
+                        Card(
+                            Modifier.fillMaxWidth(),
+                            shape = NovaCardShape,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        ) {
                             Text(e, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
                         }
                     }

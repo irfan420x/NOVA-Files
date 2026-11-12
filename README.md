@@ -56,6 +56,13 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
+- **v1.18** — Nebula Dark Premium style pass (style only, no behavior
+  changes): the app is now dark-first with the shared NOVA Nebula theme —
+  deep-space background (#0A0C1C), nebula cards (#14172B), violet primary
+  (#8B5CF6) with a violet-to-blue gradient on FABs and active tabs, cyan
+  secondary accents, pink highlights; cards are 20dp with a 1dp outline,
+  buttons 14dp, chips 12dp; empty states show a gradient-tinted icon; the
+  light theme is kept, restyled with soft surfaces and the same violet.
 - **v1.17** — Final audit fixes: share uses `ACTION_SEND` for one file (the
   old code always sent `ACTION_SEND_MULTIPLE`) with `ClipData` so the URI
   permission actually reaches the app you pick, and reports failure instead

@@ -4,9 +4,15 @@
 # Steps: aapt2 compile+link, javac R.java, kotlinc (embeddable) + Compose
 # plugin, d8, zipalign, apksigner.
 set -e
-ROOT="$HOME/workspace/nova-files"
-export JAVA_HOME="$ROOT/tools/jdk-17.0.21+9"
-export ANDROID_HOME="$HOME/android-sdk"
+# Portable paths: resolve the project root from this script's location so
+# the script works from any checkout, not just ~/workspace/nova-files.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FILES_ROOT="${NOVA_FILES_ROOT:-$ROOT/../nova-files}"
+if [ ! -d "$FILES_ROOT" ]; then FILES_ROOT="$ROOT/../NOVA-Files"; fi
+if [ ! -d "$FILES_ROOT" ]; then FILES_ROOT="$HOME/workspace/nova-files"; fi
+export JAVA_HOME="${JAVA_HOME:-$FILES_ROOT/tools/jdk-17.0.21+9}"
+export ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
 export PATH="$JAVA_HOME/bin:$PATH"
 AAPT2="$ANDROID_HOME/build-tools/35.0.0/aapt2"
 D8="$ANDROID_HOME/build-tools/35.0.0/d8"
@@ -38,7 +44,7 @@ echo "== 2. aapt2 link =="
 LINK_ARGS=(-I "$ANDROID_JAR" --manifest "$SRC/AndroidManifest.xml"
     --auto-add-overlay --java "$BUILD/gen"
     --min-sdk-version 29 --target-sdk-version 35
-    --version-code 18 --version-name 1.17
+    --version-code 19 --version-name 1.18
     -o "$BUILD/apk/app-unsigned.apk")
 while read -r pkg resdir; do
     LINK_ARGS+=(--extra-packages "$pkg")

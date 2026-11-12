@@ -1,9 +1,11 @@
 package com.nova.files.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
@@ -74,6 +76,9 @@ fun AppManagerScreen(onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
                 title = { Text("App manager", fontWeight = FontWeight.Bold) },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Filled.ArrowBack, "Back") } }
             )
@@ -89,6 +94,7 @@ fun AppManagerScreen(onBack: () -> Unit) {
                 placeholder = { Text("Search apps") },
                 leadingIcon = { Icon(Icons.Filled.Search, null) },
                 singleLine = true,
+                shape = NovaButtonShape,
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -103,13 +109,18 @@ fun AppManagerScreen(onBack: () -> Unit) {
             }
             Spacer(Modifier.height(8.dp))
             when {
-                loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-                visible.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No apps match.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(trackColor = MaterialTheme.colorScheme.surfaceContainerHighest)
                 }
+                visible.isEmpty() -> NebulaEmptyState(Icons.Filled.Apps, "No apps match.")
                 else -> LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(visible, key = { it.packageName }) { app ->
-                        Card(Modifier.fillMaxWidth()) {
+                        Card(
+                            Modifier.fillMaxWidth(),
+                            shape = NovaCardShape,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                        ) {
                             Column(Modifier.padding(12.dp)) {
                                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {
@@ -136,7 +147,8 @@ fun AppManagerScreen(onBack: () -> Unit) {
                                                 try { context.startActivity(intent) }
                                                 catch (e: Exception) { onStatus("Couldn't open ${app.label}") }
                                             } else onStatus("This app can't be opened")
-                                        }
+                                        },
+                                        shape = NovaButtonShape
                                     ) {
                                         Icon(Icons.Filled.OpenInNew, null)
                                         Spacer(Modifier.width(4.dp))
@@ -154,7 +166,8 @@ fun AppManagerScreen(onBack: () -> Unit) {
                                                 else onStatus("Couldn't back up ${app.label}")
                                             }
                                         },
-                                        enabled = backingUp == null
+                                        enabled = backingUp == null,
+                                        shape = NovaButtonShape
                                     ) {
                                         Icon(Icons.Filled.Download, null)
                                         Spacer(Modifier.width(4.dp))
@@ -165,7 +178,11 @@ fun AppManagerScreen(onBack: () -> Unit) {
                                             onClick = {
                                                 try { context.startActivity(AppRepo.uninstallIntent(app)) }
                                                 catch (e: Exception) { onStatus("Couldn't uninstall ${app.label}") }
-                                            }
+                                            },
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                contentColor = MaterialTheme.colorScheme.error
+                                            ),
+                                            shape = NovaButtonShape
                                         ) {
                                             Icon(Icons.Filled.Delete, null)
                                             Spacer(Modifier.width(4.dp))
