@@ -342,6 +342,9 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
     var error by remember { mutableStateOf("") }
     var files by remember { mutableStateOf<List<File>>(emptyList()) }
     var status by remember { mutableStateOf("") }
+    // v1.19: PBKDF2 + migration run off the main thread; the Unlock
+    // button is disabled while they run.
+    var busy by remember { mutableStateOf(false) }
     var moveOutTarget by remember { mutableStateOf<File?>(null) }
     var deleteTarget by remember { mutableStateOf<File?>(null) }
     // v1.9: confirm field for PIN setup + the Change PIN dialog state.
@@ -358,62 +361,42 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
         val uri = mainActivity?.vaultImportUri ?: return@LaunchedEffect
         mainActivity.clearVaultImportUri()
         scope.launch {
-            val result = withContext(Dispatchers.IO) {
-                // v1.17: a failed import used to leave a partial file in
-                // the vault — delete it on failure.
-                var dest: File? = null
-                try {
-                    // Real filename, not the SAF document id (lastPathSegment
-                    // gives "msf:123" for content URIs).
-                    var name = "file_${System.currentTimeMillis()}"
-                    try {
-                        context.contentResolver.query(
-                            uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
-                            null, null, null
-                        )?.use { c ->
-                            if (c.moveToFirst()) {
-                                c.getString(0)?.takeIf { it.isNotBlank() }?.let { name = it }
-                            }
-                        }
-                    } catch (_: Exception) { }
-                    dest = FileRepo.nonCollidingDest(FileRepo.vaultDir(context), name)
-                    context.contentResolver.openInputStream(uri)?.use { ins ->
-                        dest.outputStream().use { out -> ins.copyTo(out) }
-                    } ?: return@withContext "Import failed — couldn't read the file"
-                    // Import is a MOVE: the original must not stay visible
-                    // to every other app (v1.15 copied and left it behind).
-                    val deleted = try {
-                        if (uri.scheme == "file") {
-                            java.io.File(uri.path ?: "").delete()
-                        } else {
-                            android.provider.DocumentsContract.deleteDocument(context.contentResolver, uri)
-                        }
-                    } catch (_: Exception) { false }
-                    if (deleted) "Imported to Vault" else "Imported — delete the original yourself, it is still visible to other apps"
-                } catch (e: Exception) {
-                    dest?.let { runCatching { it.delete() } }
-                    ErrorLog.log(context, "Vault", "Import failed", e)
-                    "Import failed: ${e.message ?: e.javaClass.simpleName}"
-                }
-            }
-            status = result
+            // v1.19: the import encrypts the file into the vault
+            // (FileRepo.importToVault) — a failed import leaves nothing.
+            status = withContext(Dispatchers.IO) { FileRepo.importToVault(context, uri) }
             files = withContext(Dispatchers.IO) { FileRepo.vaultDir(context).listFiles()?.toList() ?: emptyList() }
         }
     }
 
     fun load() { scope.launch { files = withContext(Dispatchers.IO) { FileRepo.vaultDir(context).listFiles()?.toList() ?: emptyList() } } }
 
+    // v1.19: leaving the Vault screen locks it — the in-memory master
+    // key is wiped, so the files can't be opened again without the PIN.
+    DisposableEffect(Unit) { onDispose { FileRepo.lockVault() } }
+
     // v1.9: one shared fingerprint flow for unlock AND for "Forgot PIN?"
     // reset. The prompt now names BIOMETRIC_STRONG explicitly (the
     // recommended form with a negative button), and cancelling it or
     // tapping "Use PIN" no longer shows a scary error message.
+    //
+    // v1.19: the prompt ALWAYS carries a CryptoObject — a Keystore
+    // cipher that wraps/unwraps the vault master key. A fingerprint
+    // without the cipher cannot open the vault (there is no PIN to
+    // derive the key from), so the plain-auth path is gone: every
+    // caller builds its cipher first (FileRepo.newKeystore*Cipher) and
+    // the success callback receives the authenticated cipher to finish
+    // the wrap/unwrap. Without a stored Keystore wrap the fingerprint
+    // buttons are hidden and the UI says to use the PIN.
     val activity = LocalContext.current as? androidx.fragment.app.FragmentActivity
     // v1.17: availability was computed once per composition and went stale
     // (e.g. after enrolling a fingerprint in Settings while the app was
     // open). Recompute whenever the lock screen shows again, and re-check
     // at the moment the button is tapped.
     val biometricAvailable = remember(unlocked) { isBiometricAvailable(context) }
-    fun launchFingerprint(onSuccess: () -> Unit) {
+    fun launchFingerprint(
+        cryptoObject: androidx.biometric.BiometricPrompt.CryptoObject,
+        onCipher: (javax.crypto.Cipher) -> Unit
+    ) {
         if (!isBiometricAvailable(context)) {
             error = "Fingerprint is not set up — use your PIN"
             return
@@ -429,7 +412,9 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                         // above, so guard it too — a failure here used to
                         // crash the app instead of falling back to PIN.
                         try {
-                            onSuccess()
+                            val cipher = result.cryptoObject?.cipher
+                            if (cipher != null) onCipher(cipher)
+                            else error = "Fingerprint worked, but the vault key couldn't be used — use your PIN"
                         } catch (t: Throwable) {
                             ErrorLog.log(context, "Vault", "Fingerprint success handler failed", t)
                             error = "Fingerprint worked, but opening the vault failed (${t.javaClass.simpleName}) — use your PIN"
@@ -452,13 +437,19 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                     .setSubtitle("Use your fingerprint to unlock")
                     .setAllowedAuthenticators(androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG)
                     .setNegativeButtonText("Use PIN")
-                    .build()
+                    .build(),
+                cryptoObject
             )
         } catch (t: Throwable) {
             ErrorLog.log(context, "Vault", "Fingerprint unlock failed", t)
             error = "Fingerprint unavailable (${t.javaClass.simpleName}) — use your PIN"
         }
     }
+
+    // v1.19: fingerprint unlock needs a stored Keystore wrap (created by
+    // "Enable fingerprint unlock" after a PIN unlock). Until then the
+    // fingerprint buttons stay hidden — there is no key to unwrap.
+    val hasKeystoreWrap = FileRepo.vaultHasKeystoreWrap(context)
 
     if (!unlocked) {
         Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
@@ -474,7 +465,7 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
             if (setupMode) {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "Choose your own 4–6 digit PIN. There is no default PIN — nobody can open the vault without the PIN you set here.",
+                    "Choose your own 4–6 digit PIN. There is no default PIN — nobody can open the vault without the PIN you set here. Your files are encrypted with this PIN: if you forget it and never enabled fingerprint unlock, the files can't be recovered.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -502,27 +493,80 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
             Button(
                 onClick = {
                     if (pin.length < 4) { error = "PIN must be at least 4 digits"; return@Button }
-                    if (setupMode) {
-                        if (pin != confirmPin) { error = "PINs do not match"; return@Button }
-                        FileRepo.setVaultPin(context, pin)
-                        unlocked = true; setupMode = false; pin = ""; confirmPin = ""; load()
-                    } else if (FileRepo.checkVaultPin(context, pin)) {
-                        unlocked = true; pin = ""; load()
-                    } else error = "Wrong PIN"
+                    if (setupMode && pin != confirmPin) { error = "PINs do not match"; return@Button }
+                    val enteredPin = pin
+                    val wasSetup = setupMode
+                    busy = true; error = ""
+                    scope.launch {
+                        // v1.19: PIN setup/unlock + migration run on IO
+                        // (PBKDF2 + file encryption must never run on the
+                        // main thread). setupVaultPin also creates the
+                        // master key and wraps it under the new PIN; on a
+                        // "Forgot PIN?" reset it re-wraps the key the
+                        // fingerprint just recovered, so the files survive.
+                        val result = withContext(Dispatchers.IO) {
+                            if (wasSetup) {
+                                if (!FileRepo.setupVaultPin(context, enteredPin)) null
+                                else FileRepo.VaultUnlockResult(
+                                    true,
+                                    FileRepo.migrateLegacyVaultFiles(context)
+                                )
+                            } else {
+                                FileRepo.unlockVaultWithPin(context, enteredPin)
+                            }
+                        }
+                        busy = false
+                        if (result?.ok == true) {
+                            unlocked = true; setupMode = false; pin = ""; confirmPin = ""
+                            load()
+                            if (result.migrationFailures.isNotEmpty()) {
+                                status = "Couldn't encrypt ${result.migrationFailures.size} file(s): ${result.migrationFailures.take(3).joinToString(", ")} — they stay readable only inside the vault"
+                            }
+                        } else if (wasSetup) {
+                            error = "Couldn't set up vault encryption — try again"
+                        } else {
+                            error = "Wrong PIN"
+                        }
+                    }
                 },
                 modifier = Modifier.fillMaxWidth().nebulaGradient(NovaButtonShape),
+                enabled = !busy,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Color.Transparent, contentColor = Color.White
                 ),
                 shape = NovaButtonShape
-            ) { Text(if (setupMode) "Create vault" else "Unlock") }
-            if (!setupMode && biometricAvailable && activity != null) {
+            ) { Text(if (busy) "Unlocking…" else if (setupMode) "Create vault" else "Unlock") }
+            if (!setupMode && biometricAvailable && hasKeystoreWrap && activity != null) {
                 Spacer(Modifier.height(12.dp))
                 OutlinedButton(
-                    onClick = { launchFingerprint { unlocked = true; pin = ""; load() } },
+                    onClick = {
+                        val cipher = FileRepo.newKeystoreDecryptCipher(context)
+                        if (cipher == null) { error = "Fingerprint unavailable — use your PIN"; return@OutlinedButton }
+                        launchFingerprint(androidx.biometric.BiometricPrompt.CryptoObject(cipher)) { authed ->
+                            scope.launch {
+                                val result = withContext(Dispatchers.IO) {
+                                    FileRepo.unlockWithKeystoreCipher(context, authed)
+                                }
+                                if (result.ok) {
+                                    unlocked = true; pin = ""; load()
+                                    if (result.migrationFailures.isNotEmpty()) {
+                                        status = "Couldn't encrypt ${result.migrationFailures.size} file(s): ${result.migrationFailures.take(3).joinToString(", ")} — they stay readable only inside the vault"
+                                    }
+                                } else error = "Fingerprint worked, but the vault couldn't be opened — use your PIN"
+                            }
+                        }
+                    },
                     modifier = Modifier.fillMaxWidth(),
                     shape = NovaButtonShape
                 ) { Text("Unlock with fingerprint") }
+            }
+            if (!setupMode && biometricAvailable && !hasKeystoreWrap && activity != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Unlock once with your PIN to enable fingerprint unlock.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             if (!setupMode) {
                 Spacer(Modifier.height(8.dp))
@@ -530,10 +574,35 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                     // v1.9: "Forgot PIN?" — prove it is you with a fingerprint,
                     // then set a new PIN. This is the way out when a PIN was
                     // set during an earlier test and forgotten.
-                    if (biometricAvailable && activity != null) {
-                        launchFingerprint { setupMode = true; pin = ""; confirmPin = ""; error = "" }
-                    } else {
+                    //
+                    // v1.19: the reset only works when fingerprint unlock was
+                    // enabled (a Keystore-wrapped master key exists) — the
+                    // fingerprint unwraps the key, and the new PIN re-wraps
+                    // it, so the files survive. Without the wrap the files
+                    // are unrecoverable without the PIN, and the reset must
+                    // not orphan them by setting a new PIN anyway.
+                    if (biometricAvailable && hasKeystoreWrap && activity != null) {
+                        val cipher = FileRepo.newKeystoreDecryptCipher(context)
+                        if (cipher == null) {
+                            error = "Fingerprint unavailable — use your PIN"
+                        } else {
+                            launchFingerprint(androidx.biometric.BiometricPrompt.CryptoObject(cipher)) { authed ->
+                                scope.launch {
+                                    val result = withContext(Dispatchers.IO) {
+                                        FileRepo.unlockWithKeystoreCipher(context, authed)
+                                    }
+                                    if (result.ok) {
+                                        setupMode = true; pin = ""; confirmPin = ""; error = ""
+                                    } else {
+                                        error = "Fingerprint worked, but the vault couldn't be opened — use your PIN"
+                                    }
+                                }
+                            }
+                        }
+                    } else if (!biometricAvailable) {
                         error = "Fingerprint is not set up, so the PIN cannot be reset from here. Clear the app data in Settings to reset the vault — this also deletes the vault files."
+                    } else {
+                        error = "Fingerprint unlock was never enabled, so the vault can't be recovered without the PIN — the files are encrypted. To start over, clear the app data in Settings (this deletes the vault files)."
                     }
                 }) { Text("Forgot PIN?") }
             }
@@ -562,7 +631,23 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
         }
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().padding(16.dp)) {
-            Text("Files in the vault are stored in private app storage — other apps cannot see them.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Files in the vault are encrypted (AES-256) and stored in private app storage — other apps cannot see them, and they can't be read without your PIN.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (!hasKeystoreWrap && biometricAvailable && activity != null) {
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = {
+                        val cipher = FileRepo.newKeystoreEncryptCipher()
+                        if (cipher == null) { status = "Fingerprint unavailable"; return@OutlinedButton }
+                        launchFingerprint(androidx.biometric.BiometricPrompt.CryptoObject(cipher)) { authed ->
+                            scope.launch {
+                                val ok = withContext(Dispatchers.IO) { FileRepo.finishKeystoreWrap(context, authed) }
+                                status = if (ok) "Fingerprint unlock enabled" else "Couldn't enable fingerprint unlock"
+                            }
+                        }
+                    },
+                    shape = NovaButtonShape
+                ) { Text("Enable fingerprint unlock") }
+            }
             if (status.isNotBlank()) { Spacer(Modifier.height(8.dp)); Text(status, color = MaterialTheme.colorScheme.primary) }
             Spacer(Modifier.height(12.dp))
             if (files.isEmpty()) {
@@ -594,8 +679,21 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                                 .background(MaterialTheme.colorScheme.surface)
                                 .border(1.dp, MaterialTheme.colorScheme.outline, NovaRowShape)
                                 .clickable {
-                                    if (isImage(f) || f.extensionLower() == "txt") onOpenFile(f)
-                                    else status = "Only images and text open inside the Vault — move it out to open it elsewhere"
+                                    if (isImage(f) || f.extensionLower() == "txt") {
+                                        // v1.19: the viewer reads a plain File,
+                                        // so an encrypted vault file is
+                                        // decrypted to a private temp file
+                                        // first (deleted when the viewer
+                                        // closes); a damaged file refuses
+                                        // to open instead of showing junk.
+                                        scope.launch {
+                                            val opened = withContext(Dispatchers.IO) {
+                                                FileRepo.openVaultFileForViewing(context, f)
+                                            }
+                                            if (opened != null) onOpenFile(opened)
+                                            else status = "Couldn't open this file — it may be damaged"
+                                        }
+                                    } else status = "Only images and text open inside the Vault — move it out to open it elsewhere"
                                 }
                         )
                     }
@@ -614,7 +712,10 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
             onPick = { dest ->
                 moveOutTarget = null
                 scope.launch {
-                    val ok = FileRepo.copyFiles(listOf(target), dest, move = true) { _, _ -> }
+                    // v1.19: moving out decrypts the file — it leaves the
+                    // vault as a normal file. The vault original is kept
+                    // on failure.
+                    val ok = FileRepo.moveVaultFileOut(context, target, dest)
                     status = if (ok) "Moved to ${dest.name}" else "Couldn't move file"
                     load()
                 }
@@ -683,9 +784,17 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
                         newPin.length < 4 -> changeError = "New PIN must be at least 4 digits"
                         newPin != confirmNewPin -> changeError = "New PINs do not match"
                         else -> {
-                            FileRepo.setVaultPin(context, newPin)
-                            showChangePin = false
-                            status = "PIN changed"
+                            // v1.19: only the master-key wrap changes — no
+                            // file is re-encrypted. Runs on IO (PBKDF2).
+                            scope.launch {
+                                val ok = withContext(Dispatchers.IO) {
+                                    FileRepo.changeVaultPin(context, currentPin, newPin)
+                                }
+                                if (ok) {
+                                    showChangePin = false
+                                    status = "PIN changed"
+                                } else changeError = "Current PIN is wrong or the vault couldn't be opened"
+                            }
                         }
                     }
                 }) { Text("Change") }
@@ -705,7 +814,7 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
             title = { Text("Remove vault PIN?") },
             text = {
                 Column {
-                    Text("The vault will lock, and next time you open it you will be asked to set a new PIN. Files already in the vault stay where they are.")
+                    Text("The vault will lock, and next time you open it you will be asked to set a new PIN. Files already in the vault stay where they are — they are decrypted back to normal files first, so they stay readable.")
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
                         value = currentPin, onValueChange = { currentPin = it.filter { c -> c.isDigit() }.take(6); removeError = null },
@@ -718,16 +827,25 @@ fun VaultScreen(onOpenFile: (File) -> Unit) {
             },
             confirmButton = {
                 TextButton(onClick = {
-                    if (!FileRepo.checkVaultPin(context, currentPin)) {
-                        removeError = "Current PIN is wrong"
-                    } else {
-                        FileRepo.clearVaultPin(context)
-                        showRemovePin = false
-                        unlocked = false
-                        pin = ""; confirmPin = ""
-                        setupMode = true
-                        error = ""
-                        status = ""
+                    // v1.19: removing the PIN first decrypts the vault
+                    // back to plaintext (otherwise the files would be
+                    // unreadable forever). A failure keeps the PIN.
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            FileRepo.removeVaultPin(context, currentPin)
+                        }
+                        if (result.ok) {
+                            showRemovePin = false
+                            unlocked = false
+                            pin = ""; confirmPin = ""
+                            setupMode = true
+                            error = ""
+                            status = ""
+                        } else if (result.failedFiles.isNotEmpty()) {
+                            removeError = "Couldn't decrypt ${result.failedFiles.size} file(s): ${result.failedFiles.take(3).joinToString(", ")} — the PIN stays"
+                        } else {
+                            removeError = result.error ?: "Couldn't remove the PIN"
+                        }
                     }
                 }) { Text("Remove PIN") }
             },

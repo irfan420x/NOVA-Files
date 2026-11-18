@@ -988,10 +988,17 @@ object FileRepo {
     // Format: "v2:<salt hex>:<SHA-256(salt + pin) hex>". An old v1 hash is
     // still accepted once, then migrated to the salted format on the spot.
     fun setVaultPin(context: Context, pin: String) {
-        val salt = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
-        val stored = "v2:${salt.toHex()}:${pinHash(pin, salt)}"
         context.getSharedPreferences("nova_files", Context.MODE_PRIVATE)
-            .edit().putString("vault_pin", stored).apply()
+            .edit().putString("vault_pin", buildStoredPinHash(pin)).apply()
+    }
+
+    // Build the stored PIN hash value ("v2:<salt>:<hash>") without writing
+    // it, so callers that commit other vault prefs can include the PIN
+    // hash in the SAME edit (F-V19-1: a split commit could leave a PIN
+    // hash that cannot unwrap the stored key).
+    private fun buildStoredPinHash(pin: String): String {
+        val salt = ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
+        return "v2:${salt.toHex()}:${pinHash(pin, salt)}"
     }
 
     fun checkVaultPin(context: Context, pin: String): Boolean {
@@ -1035,6 +1042,414 @@ object FileRepo {
         context.getSharedPreferences("nova_files", Context.MODE_PRIVATE)
             .edit().remove("vault_pin").apply()
     }
+
+    // ---------- Vault encryption (v1.19) ----------
+    //
+    // The vault used to be a PIN lock over plaintext files in private
+    // storage: anyone who could read the app's files (backup, rooted
+    // phone, a forensic image) could read every vault file. v1.19 encrypts
+    // file contents with AES-256-GCM under a random per-vault master key
+    // (see VaultCrypto). The master key is wrapped with a key derived
+    // from the PIN (PBKDF2-HMAC-SHA256) and, once fingerprint unlock is
+    // enabled, also under an Android Keystore key (see VaultKeystore).
+    // The PIN and the keys are never stored; the master key lives only in
+    // VaultSession while the vault is unlocked.
+    //
+    // Migration: a vault created before v1.19 holds plaintext files.
+    // The first unlock after the update encrypts them in place
+    // (VaultCrypto.migrateDirectory); files that fail to encrypt stay
+    // plaintext and are reported, never silently.
+    //
+    // PBKDF2 + file encryption run on the calling thread — the UI calls
+    // these from Dispatchers.IO (see VaultScreen), never the main thread.
+
+    data class VaultUnlockResult(val ok: Boolean, val migrationFailures: List<String> = emptyList())
+    data class RemovePinResult(val ok: Boolean, val error: String? = null, val failedFiles: List<String> = emptyList())
+
+    private const val VAULT_PREF_SALT = "vault_kdf_salt"
+    private const val VAULT_PREF_WRAPPED_KEY = "vault_wrapped_key"
+    private const val VAULT_PREF_KEYSTORE_WRAPPED = "vault_keystore_wrapped"
+
+    private fun vaultPrefs(context: Context) =
+        context.getSharedPreferences("nova_files", Context.MODE_PRIVATE)
+
+    private fun ByteArray.toB64(): String =
+        android.util.Base64.encodeToString(this, android.util.Base64.NO_WRAP)
+
+    private fun String.b64ToBytes(): ByteArray? = runCatching {
+        android.util.Base64.decode(this, android.util.Base64.NO_WRAP)
+    }.getOrNull()
+
+    /** True once a wrapped master key exists (fresh setup or first unlock). */
+    fun vaultHasCryptoSetup(context: Context): Boolean =
+        vaultPrefs(context).getString(VAULT_PREF_WRAPPED_KEY, null) != null
+
+    /** True once fingerprint unlock was enabled (a Keystore-wrapped copy
+     *  of the master key exists). Without it, fingerprint cannot unlock
+     *  the vault — the UI hides the fingerprint button until then. */
+    fun vaultHasKeystoreWrap(context: Context): Boolean =
+        vaultPrefs(context).getString(VAULT_PREF_KEYSTORE_WRAPPED, null) != null
+
+    private fun getVaultSalt(context: Context): ByteArray? =
+        vaultPrefs(context).getString(VAULT_PREF_SALT, null)?.b64ToBytes()
+
+    private fun getOrCreateVaultSalt(context: Context): ByteArray? {
+        getVaultSalt(context)?.let { return it }
+        val salt = VaultCrypto.randomBytes(VaultCrypto.SALT_BYTES)
+        vaultPrefs(context).edit().putString(VAULT_PREF_SALT, salt.toB64()).apply()
+        return salt
+    }
+
+    private fun getVaultWrappedKey(context: Context): ByteArray? =
+        vaultPrefs(context).getString(VAULT_PREF_WRAPPED_KEY, null)?.b64ToBytes()
+
+    private fun storeVaultWrappedKey(context: Context, wrapped: ByteArray) {
+        vaultPrefs(context).edit().putString(VAULT_PREF_WRAPPED_KEY, wrapped.toB64()).apply()
+    }
+
+    private fun getKeystoreWrapped(context: Context): ByteArray? =
+        vaultPrefs(context).getString(VAULT_PREF_KEYSTORE_WRAPPED, null)?.b64ToBytes()
+
+    /**
+     * Set a PIN and set up encryption for it. If the vault is already
+     * unlocked (the "Forgot PIN?" reset), the existing master key is
+     * re-wrapped under the new PIN — the files are NOT re-encrypted and
+     * stay readable. On a fresh vault a new master key is generated.
+     * Nothing is committed unless the wrap succeeds, so a failure leaves
+     * the old PIN and the old wrapped key in place. Returns false on
+     * crypto failure.
+     */
+    fun setupVaultPin(context: Context, pin: String): Boolean {
+        val master = VaultSession.get() ?: VaultCrypto.generateMasterKey()
+        val newSalt = VaultCrypto.randomBytes(VaultCrypto.SALT_BYTES)
+        val kek = VaultCrypto.deriveKek(pin, newSalt)
+        val wrapped = try {
+            VaultCrypto.wrapMasterKey(kek, master)
+        } finally {
+            VaultCrypto.wipe(kek)
+        } ?: return false
+        // F-V19-1: salt + wrapped key + PIN hash in ONE edit. A second
+        // apply() for the PIN hash could leave a hash that cannot unwrap
+        // the stored key if the process is killed in between.
+        vaultPrefs(context).edit()
+            .putString(VAULT_PREF_SALT, newSalt.toB64())
+            .putString(VAULT_PREF_WRAPPED_KEY, wrapped.toB64())
+            .putString("vault_pin", buildStoredPinHash(pin))
+            .apply()
+        VaultSession.set(master)
+        VaultCrypto.wipe(master)
+        return true
+    }
+
+    /** Unlock with the PIN: verify it, unwrap the master key into the
+     *  session, then encrypt any legacy plaintext files in place.
+     *  [VaultUnlockResult.migrationFailures] names files that could not
+     *  be encrypted — they stay readable inside the vault and the UI
+     *  must say so. */
+    fun unlockVaultWithPin(context: Context, pin: String): VaultUnlockResult {
+        if (!checkVaultPin(context, pin)) return VaultUnlockResult(false)
+        val salt = getOrCreateVaultSalt(context) ?: return VaultUnlockResult(false)
+        val kek = VaultCrypto.deriveKek(pin, salt)
+        try {
+            val wrapped = getVaultWrappedKey(context)
+            val master = if (wrapped != null) {
+                VaultCrypto.unwrapMasterKey(kek, wrapped) ?: return VaultUnlockResult(false)
+            } else {
+                // Pre-v1.19 vault: no wrapped key yet. The files are still
+                // plaintext (migration runs below), so generating a fresh
+                // master key here loses nothing.
+                val fresh = VaultCrypto.generateMasterKey()
+                val w = VaultCrypto.wrapMasterKey(kek, fresh) ?: return VaultUnlockResult(false)
+                storeVaultWrappedKey(context, w)
+                fresh
+            }
+            VaultSession.set(master)
+            clearVaultViewTemps(context)
+            val failures = VaultCrypto.migrateDirectory(vaultDir(context), master)
+            VaultCrypto.wipe(master)
+            return VaultUnlockResult(true, failures)
+        } finally {
+            VaultCrypto.wipe(kek)
+        }
+    }
+
+    /** Lock the vault: drop the in-memory master key. */
+    fun lockVault() {
+        VaultSession.clear()
+    }
+
+    /** Encrypt legacy plaintext files using the session key (used after
+     *  a "Forgot PIN?" reset, where [setupVaultPin] re-wraps the key but
+     *  does not migrate). Returns the names that could not be encrypted;
+     *  empty when locked or when there is nothing to migrate. */
+    fun migrateLegacyVaultFiles(context: Context): List<String> {
+        val master = VaultSession.get() ?: return emptyList()
+        val failures = VaultCrypto.migrateDirectory(vaultDir(context), master)
+        VaultCrypto.wipe(master)
+        return failures
+    }
+
+    /**
+     * Change the PIN. Only the master-key wrap changes — no file is
+     * re-encrypted, and the Keystore wrap stays valid (same master key).
+     * Nothing is committed unless the new wrap succeeds. False when the
+     * current PIN is wrong or the old wrap cannot be opened.
+     */
+    fun changeVaultPin(context: Context, currentPin: String, newPin: String): Boolean {
+        if (!checkVaultPin(context, currentPin)) return false
+        val master = VaultSession.get() ?: run {
+            val salt = getVaultSalt(context) ?: return false
+            val kek = VaultCrypto.deriveKek(currentPin, salt)
+            try {
+                val wrapped = getVaultWrappedKey(context) ?: return false
+                VaultCrypto.unwrapMasterKey(kek, wrapped) ?: return false
+            } finally {
+                VaultCrypto.wipe(kek)
+            }
+        }
+        val newSalt = VaultCrypto.randomBytes(VaultCrypto.SALT_BYTES)
+        val newKek = VaultCrypto.deriveKek(newPin, newSalt)
+        val newWrapped = try {
+            VaultCrypto.wrapMasterKey(newKek, master)
+        } finally {
+            VaultCrypto.wipe(newKek)
+        } ?: run { VaultCrypto.wipe(master); return false }
+        // F-V19-1: salt + wrapped key + PIN hash in ONE edit (see
+        // setupVaultPin) — never a separate setVaultPin() apply() after.
+        vaultPrefs(context).edit()
+            .putString(VAULT_PREF_SALT, newSalt.toB64())
+            .putString(VAULT_PREF_WRAPPED_KEY, newWrapped.toB64())
+            .putString("vault_pin", buildStoredPinHash(newPin))
+            .apply()
+        VaultSession.set(master)
+        VaultCrypto.wipe(master)
+        return true
+    }
+
+    /**
+     * Remove the PIN (v1.10 semantics: the files stay, only the lock
+     * goes). With encryption that means the vault is first decrypted
+     * back to plaintext — otherwise the files would be unreadable
+     * forever. The decrypt is two-pass (verify all, then replace), so a
+     * failure aborts before anything is replaced and the PIN stays.
+     * On success the PIN, the KDF salt, both wrapped keys and the
+     * Keystore key are all deleted and the session is cleared.
+     */
+    fun removeVaultPin(context: Context, currentPin: String): RemovePinResult {
+        if (!checkVaultPin(context, currentPin)) {
+            return RemovePinResult(false, "Current PIN is wrong")
+        }
+        val master = VaultSession.get() ?: run {
+            val salt = getVaultSalt(context)
+                ?: return RemovePinResult(false, "Couldn't unlock the vault")
+            val kek = VaultCrypto.deriveKek(currentPin, salt)
+            try {
+                val wrapped = getVaultWrappedKey(context)
+                    ?: return RemovePinResult(false, "Couldn't unlock the vault")
+                VaultCrypto.unwrapMasterKey(kek, wrapped)
+                    ?: return RemovePinResult(false, "Couldn't unlock the vault")
+            } finally {
+                VaultCrypto.wipe(kek)
+            }
+        }
+        val failures = VaultCrypto.decryptDirectoryInPlace(vaultDir(context), master)
+        VaultCrypto.wipe(master)
+        if (failures.isNotEmpty()) {
+            return RemovePinResult(false, null, failures)
+        }
+        vaultPrefs(context).edit()
+            .remove("vault_pin")
+            .remove(VAULT_PREF_SALT)
+            .remove(VAULT_PREF_WRAPPED_KEY)
+            .remove(VAULT_PREF_KEYSTORE_WRAPPED)
+            .apply()
+        VaultKeystore.deleteKey()
+        VaultSession.clear()
+        return RemovePinResult(true)
+    }
+
+    // --- Fingerprint unlock (Keystore-wrapped master key) ---
+
+    /** Cipher for a BiometricPrompt CryptoObject that will ENCRYPT the
+     *  master key (enabling fingerprint unlock). Null when the Keystore
+     *  is unavailable. The UI calls this, prompts, then [finishKeystoreWrap]. */
+    fun newKeystoreEncryptCipher(): javax.crypto.Cipher? =
+        VaultKeystore.newEncryptCipher()
+
+    /** Complete enabling fingerprint unlock after biometric success.
+     *  False when the vault is locked or the wrap fails. */
+    fun finishKeystoreWrap(context: Context, cipher: javax.crypto.Cipher): Boolean {
+        val master = VaultSession.get() ?: return false
+        val wrapped = VaultKeystore.finishWrap(cipher, master)
+            ?: run { VaultCrypto.wipe(master); return false }
+        VaultCrypto.wipe(master)
+        vaultPrefs(context).edit()
+            .putString(VAULT_PREF_KEYSTORE_WRAPPED, wrapped.toB64()).apply()
+        return true
+    }
+
+    /** Cipher for a BiometricPrompt CryptoObject that will DECRYPT the
+     *  master key (fingerprint unlock / "Forgot PIN?"). Null when no
+     *  Keystore wrap exists or the Keystore is unavailable. F-V19-2: when
+     *  the Keystore key was invalidated by a new biometric enrolment the
+     *  stored wrap can never unwrap again, so the key and the stale wrap
+     *  pref are deleted here — the "Enable fingerprint unlock" button
+     *  reappears and the user can re-enable it. PIN unlock is untouched. */
+    fun newKeystoreDecryptCipher(context: Context): javax.crypto.Cipher? {
+        val wrapped = getKeystoreWrapped(context) ?: return null
+        val cipher = VaultKeystore.newDecryptCipher(wrapped)
+        if (cipher == null && VaultKeystore.isKeyInvalidated()) {
+            VaultKeystore.deleteKey()
+            vaultPrefs(context).edit().remove(VAULT_PREF_KEYSTORE_WRAPPED).apply()
+        }
+        return cipher
+    }
+
+    /** Complete a fingerprint unlock after biometric success: unwrap the
+     *  master key into the session and migrate legacy files, like the
+     *  PIN path. False when the unwrap fails. */
+    fun unlockWithKeystoreCipher(context: Context, cipher: javax.crypto.Cipher): VaultUnlockResult {
+        val wrapped = getKeystoreWrapped(context) ?: return VaultUnlockResult(false)
+        val master = VaultKeystore.finishUnwrap(cipher, wrapped) ?: return VaultUnlockResult(false)
+        VaultSession.set(master)
+        clearVaultViewTemps(context)
+        val failures = VaultCrypto.migrateDirectory(vaultDir(context), master)
+        VaultCrypto.wipe(master)
+        return VaultUnlockResult(true, failures)
+    }
+
+    // --- Vault file operations (all need the vault unlocked) ---
+
+    /**
+     * Import a file into the vault (MOVE semantics, like before): the
+     * incoming stream is encrypted into the vault under its real name
+     * and the original is deleted. A partial import leaves nothing
+     * behind. Returns the status string for the UI.
+     */
+    fun importToVault(context: Context, uri: android.net.Uri): String {
+        val master = VaultSession.get() ?: return "Vault is locked — unlock it first"
+        var dest: File? = null
+        var tmp: File? = null
+        var renamed = false
+        try {
+            var name = "file_${System.currentTimeMillis()}"
+            try {
+                context.contentResolver.query(
+                    uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+                    null, null, null
+                )?.use { c ->
+                    if (c.moveToFirst()) {
+                        c.getString(0)?.takeIf { it.isNotBlank() }?.let { name = it }
+                    }
+                }
+            } catch (_: Exception) { }
+            dest = nonCollidingDest(vaultDir(context), name)
+            tmp = File(vaultDir(context), dest.name + ".tmp-imp")
+            context.contentResolver.openInputStream(uri)?.use { ins ->
+                FileOutputStream(tmp).use { out ->
+                    VaultCrypto.encryptStream(master, ins, out)
+                }
+            } ?: return "Import failed — couldn't read the file"
+            if (!tmp.renameTo(dest)) {
+                runCatching { tmp.delete() }
+                return "Import failed — couldn't save the file"
+            }
+            renamed = true
+            tmp = null // renamed; the catch below must not delete dest
+            // Import is a MOVE: the original must not stay visible to
+            // every other app (v1.15 copied and left it behind).
+            val deleted = try {
+                if (uri.scheme == "file") {
+                    File(uri.path ?: "").delete()
+                } else {
+                    android.provider.DocumentsContract.deleteDocument(context.contentResolver, uri)
+                }
+            } catch (_: Exception) { false }
+            return if (deleted) "Imported to Vault"
+            else "Imported — delete the original yourself, it is still visible to other apps"
+        } catch (e: Exception) {
+            tmp?.let { runCatching { it.delete() } }
+            if (!renamed) dest?.let { runCatching { it.delete() } }
+            ErrorLog.log(context, "Vault", "Import failed", e)
+            return "Import failed: ${e.message ?: e.javaClass.simpleName}"
+        } finally {
+            VaultCrypto.wipe(master)
+        }
+    }
+
+    /**
+     * Open a vault file in the viewer. Encrypted files are decrypted to
+     * a temp file in private cache storage (the viewer reads a plain
+     * File); the caller deletes the temp file when the viewer closes.
+     * Legacy plaintext files are returned as-is. Null when locked or
+     * when decryption fails.
+     */
+    fun openVaultFileForViewing(context: Context, file: File): File? {
+        if (!VaultCrypto.isEncrypted(file)) return file
+        val master = VaultSession.get() ?: return null
+        try {
+            val viewDir = File(context.cacheDir, "vault-view").apply { mkdirs() }
+            val tmp = nonCollidingDest(viewDir, file.name)
+            if (!VaultCrypto.decryptFileTo(master, file, tmp)) {
+                runCatching { tmp.delete() }
+                return null
+            }
+            return tmp
+        } catch (e: Exception) {
+            ErrorLog.log(context, "Vault", "Couldn't open file for viewing", e)
+            return null
+        } finally {
+            VaultCrypto.wipe(master)
+        }
+    }
+
+    /** Delete stale viewer temp files (left behind if the app was
+     *  killed while a vault file was open). */
+    fun clearVaultViewTemps(context: Context) {
+        File(context.cacheDir, "vault-view").listFiles()
+            ?.forEach { runCatching { it.delete() } }
+    }
+
+    /**
+     * Move a file OUT of the vault (v1.7): it is decrypted to the
+     * destination as a normal file and the vault original is deleted.
+     * Legacy plaintext files move the old way. False on any failure —
+     * the vault original is kept.
+     */
+    suspend fun moveVaultFileOut(context: Context, file: File, destDir: File): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                if (!VaultCrypto.isEncrypted(file)) {
+                    copyFiles(listOf(file), destDir, move = true) { _, _ -> }
+                } else {
+                    val master = VaultSession.get() ?: return@withContext false
+                    try {
+                        val dest = nonCollidingDest(destDir, file.name)
+                        if (!VaultCrypto.decryptFileTo(master, file, dest)) {
+                            runCatching { dest.delete() }
+                            return@withContext false
+                        }
+                        // F-V19-6: do not silently ignore a failed delete —
+                        // the file then exists both inside and outside the
+                        // vault. The move itself succeeded, so still true.
+                        if (!file.delete()) {
+                            ErrorLog.log(
+                                context, "Vault",
+                                "Move out: decrypted ${file.name} but could not " +
+                                    "delete the vault original — file now exists " +
+                                    "in both places"
+                            )
+                        }
+                        true
+                    } finally {
+                        VaultCrypto.wipe(master)
+                    }
+                }
+            } catch (e: Exception) {
+                ErrorLog.log(context, "Vault", "Move out failed", e)
+                false
+            }
+        }
 }
 
 /**

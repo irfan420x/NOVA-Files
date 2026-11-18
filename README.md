@@ -17,7 +17,8 @@ for Android 10+.
   ZIP-slip guard and an "Extract to…" picker)
 - **PIN Vault** — a locked folder with a PIN and fingerprint unlock
   (no default PIN — the first entry asks you to set one); Change PIN,
-  Remove PIN, and "Forgot PIN?" via fingerprint
+  Remove PIN, and "Forgot PIN?" via fingerprint. Vault files are
+  encrypted at rest (AES-256-GCM, key from the PIN) — see v1.19.
 - **Viewers** — image viewer with pinch-zoom, share and prev/next;
   text viewer
 - **App Manager** — every installed app with its size, APK backup to
@@ -56,6 +57,20 @@ Minimum SDK 29 (Android 10), target SDK 35.
 
 ## Version history
 
+- **v1.19** — Vault AES encryption: vault files are now encrypted at
+  rest (AES-256-GCM under a random per-vault master key; the key is
+  wrapped with a PBKDF2-HMAC-SHA256 key derived from the PIN, and also
+  under an Android Keystore key once fingerprint unlock is enabled).
+  First unlock after the update encrypts existing vault files in place
+  (failures are reported, never silent). Import encrypts on the way in;
+  opening a vault file decrypts to a private temp file that is deleted
+  when the viewer closes; moving a file out decrypts it. Changing the
+  PIN only re-wraps the master key. Removing the PIN decrypts the vault
+  back to plaintext first, so the files stay readable. "Forgot PIN?"
+  works only when fingerprint unlock was enabled — otherwise the files
+  can't be recovered without the PIN, and the app says so instead of
+  orphaning them. Fingerprint unlock is enabled once from inside the
+  unlocked vault ("Enable fingerprint unlock").
 - **v1.18** — Nebula Dark Premium style pass (style only, no behavior
   changes): the app is now dark-first with the shared NOVA Nebula theme —
   deep-space background (#0A0C1C), nebula cards (#14172B), violet primary
