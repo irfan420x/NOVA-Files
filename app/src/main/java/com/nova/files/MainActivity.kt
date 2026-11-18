@@ -119,6 +119,10 @@ fun NovaApp() {
     // v1.17: the viewer hides its Share button for vault files — a vault
     // file shared to another app stops being private.
     var viewerIsVault by remember { mutableStateOf(false) }
+    // v1.19: a vault file opens in the viewer as a decrypted temp file
+    // (see VaultScreen) — it is deleted when the viewer closes, so no
+    // plaintext copy is left in cache.
+    var vaultViewTemp by remember { mutableStateOf<File?>(null) }
     // v1.8: the in-app error log opens as an overlay, like the viewer.
     var showErrorLog by remember { mutableStateOf(false) }
     val viewerFile = viewerFiles.getOrNull(viewerIndex)
@@ -149,7 +153,13 @@ fun NovaApp() {
     }
 
     // System back in the file/image viewer closes the viewer instead of the app.
-    BackHandler(enabled = viewerFile != null) { viewerFiles = emptyList(); viewerIsVault = false }
+    // v1.19: closing the viewer also deletes the vault view temp file.
+    fun closeViewer() {
+        viewerFiles = emptyList(); viewerIsVault = false
+        vaultViewTemp?.let { runCatching { it.delete() } }
+        vaultViewTemp = null
+    }
+    BackHandler(enabled = viewerFile != null) { closeViewer() }
     // v1.7: back from a category list returns Home (v1.0–v1.6 exited the app).
     BackHandler(enabled = viewerFile == null && browseCategory != null && screen == Screen.BROWSER) {
         browseCategory = null; screen = Screen.HOME
@@ -200,8 +210,15 @@ fun NovaApp() {
                 viewerFiles = viewerFiles, viewerIndex = viewerIndex,
                 viewerIsVault = viewerIsVault,
                 onViewerIsVaultChange = { viewerIsVault = it },
+                // v1.19: only a decrypted temp file (cache/vault-view/…)
+                // is tracked for deletion — a legacy plaintext vault file
+                // opened directly must never be deleted on viewer close.
+                onVaultViewTemp = { f ->
+                    val viewDir = File(context.cacheDir, "vault-view")
+                    if (f.absolutePath.startsWith(viewDir.absolutePath + File.separator)) vaultViewTemp = f
+                },
                 onViewerIndex = { viewerIndex = it },
-                onCloseViewer = { viewerFiles = emptyList(); viewerIsVault = false },
+                onCloseViewer = { closeViewer() },
                 onOpenViewer = ::openViewer,
                 showErrorLog = showErrorLog,
                 onShowErrorLog = { showErrorLog = it }
@@ -220,6 +237,7 @@ private fun NovaAppContent(
     darkTheme: Boolean, onToggleTheme: () -> Unit,
     viewerFile: File?, viewerFiles: List<File>, viewerIndex: Int,
     viewerIsVault: Boolean, onViewerIsVaultChange: (Boolean) -> Unit,
+    onVaultViewTemp: (File) -> Unit,
     onViewerIndex: (Int) -> Unit, onCloseViewer: () -> Unit,
     onOpenViewer: (File, List<File>) -> Unit,
     showErrorLog: Boolean, onShowErrorLog: (Boolean) -> Unit
@@ -315,7 +333,7 @@ private fun NovaAppContent(
                     onOpenDir = { dir -> onBrowseDir(dir); onBrowseCategory(null); onScreenChange(Screen.BROWSER) }
                 )
                 Screen.TRASH -> TrashScreen()
-                Screen.VAULT -> VaultScreen(onOpenFile = { f -> onViewerIsVaultChange(true); onOpenViewer(f, listOf(f)) })
+                Screen.VAULT -> VaultScreen(onOpenFile = { f -> onViewerIsVaultChange(true); onVaultViewTemp(f); onOpenViewer(f, listOf(f)) })
             }
         }
     }
